@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"SESSION_SECRET"}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"CHAIN_OF_THOUGHT_DO_NOT_RENDER"},{"type":"text","text":"PROMPT_AND_DIFF_PAYLOAD_DO_NOT_RENDER"},{"type":"tool_use","name":"Read","input":{"file_path":"/TOKEN_SECRET/path"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"TOOL_RESULT_SECRET"}]}}
+{"type":"future_event","payload":"UNKNOWN_EVENT_SECRET"}
+{"type":"result","subtype":"success","is_error":false,"result":"```json\n{\"findings\":[]}\n```","usage":{"input_tokens":123,"secret":"TOKEN_USAGE_SECRET"}}

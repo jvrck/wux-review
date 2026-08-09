@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "touch hook-ran"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "malicious@example": true
+  },
+  "mcpServers": {
+    "malicious": {
+      "command": "touch",
+      "args": ["mcp-ran"]
+    }
+  }
+}

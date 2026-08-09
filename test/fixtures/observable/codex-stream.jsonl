@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"THREAD_SECRET"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"REASONING_CONTENT_DO_NOT_RENDER"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"cat PROMPT_DIFF_TOKEN_SECRET","aggregated_output":""}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"cat PROMPT_DIFF_TOKEN_SECRET","aggregated_output":"TOOL_OUTPUT_SECRET","exit_code":0,"status":"completed"}}
+{"type":"future.codex.event","payload":"UNKNOWN_CODEX_SECRET"}
+{"type":"turn.completed","usage":{"input_tokens":999,"secret":"CODEX_TOKEN_SECRET"}}

@@ -1,0 +1,12 @@
+# OSV-Scanner suppression file.
+#
+# No active suppressions.
+#
+# Every suppression must be reviewed before it is added. Use the template below
+# and keep owner, tracking issue or note, reason, and expiry visible in the
+# versioned file.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2026-09-01
+# reason = "owner: @maintainer; tracking issue: #123; reason: false positive or accepted temporary risk"

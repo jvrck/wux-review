@@ -1,0 +1,49 @@
+{
+  "name": "wux-review",
+  "version": "0.0.0",
+  "description": "Portable Claude+Codex dual-review CLI, built on wux.",
+  "license": "MIT",
+  "author": {
+    "name": "Jim Vrckovski",
+    "url": "https://github.com/jvrck"
+  },
+  "homepage": "https://github.com/jvrck/wux-review#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jvrck/wux-review.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jvrck/wux-review/issues"
+  },
+  "type": "module",
+  "private": true,
+  "bin": {
+    "wux-review": "./src/index.ts"
+  },
+  "scripts": {
+    "wux-review": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check:large-files": "bash scripts/check-tracked-large-files.sh",
+    "skills:generate": "bun run scripts/generate-skills.ts",
+    "build": "bun run skills:generate && bun build src/index.ts --compile --outfile dist/wux-review",
+    "security:install": "scripts/install-security-tools.sh",
+    "security:osv": "osv-scanner scan source --lockfile=bun.lock --config=osv-scanner.toml",
+    "security:trivy": "trivy fs --scanners vuln --include-dev-deps --ignorefile .trivyignore.yaml .",
+    "security:gate": "trivy fs --scanners vuln --include-dev-deps --ignorefile .trivyignore.yaml --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .",
+    "security:license": "trivy fs --scanners license --include-dev-deps --severity UNKNOWN,MEDIUM,HIGH,CRITICAL --exit-code 1 .",
+    "security:sbom": "trivy fs --format cyclonedx --include-dev-deps --output sbom.cdx.json .",
+    "security:sbom:scan": "trivy sbom sbom.cdx.json --ignorefile .trivyignore.yaml --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1"
+  },
+  "engines": {
+    "bun": ">=1.3.9"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  }
+}

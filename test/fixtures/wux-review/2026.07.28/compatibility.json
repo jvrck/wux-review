@@ -1,0 +1,95 @@
+{
+  "release": "2026.07.28",
+  "approve": {
+    "json": {
+      "verdict": "approve",
+      "must_fix": [],
+      "nice_fix": [],
+      "nits": [],
+      "reviewers": {
+        "claude": "approve",
+        "codex": "approve"
+      },
+      "session": "compat-approve"
+    },
+    "exit": 0,
+    "comments": {
+      "claude": "<!-- dual-review:claude -->\n\n**Dual-review (claude) — round 1 · updated 2026-07-28T00:00:00Z · verdict: clean**\n\n## wux-review · claude: 🟢 approve\n\nNo findings.\n\n<sub>session `compat-approve`</sub>",
+      "codex": "<!-- dual-review:codex -->\n\n**Dual-review (codex) — round 1 · updated 2026-07-28T00:00:00Z · verdict: clean**\n\n## wux-review · codex: 🟢 approve\n\nNo findings.\n\n<sub>session `compat-approve`</sub>"
+    }
+  },
+  "block": {
+    "json": {
+      "verdict": "block",
+      "must_fix": [
+        {
+          "lens": "correctness",
+          "file": "src/x.ts",
+          "line": 7,
+          "finding": "off by one",
+          "raised_by": [
+            "codex"
+          ]
+        }
+      ],
+      "nice_fix": [],
+      "nits": [],
+      "reviewers": {
+        "claude": "approve",
+        "codex": "block"
+      },
+      "session": "compat-block"
+    },
+    "exit": 2,
+    "comments": {
+      "claude": "<!-- dual-review:claude -->\n\n**Dual-review (claude) — round 2 · updated 2026-07-28T00:00:00Z · verdict: clean**\n\n## wux-review · claude: 🟢 approve\n\nNo findings.\n\n<sub>session `compat-block`</sub>",
+      "codex": "<!-- dual-review:codex -->\n\n**Dual-review (codex) — round 2 · updated 2026-07-28T00:00:00Z · verdict: must-fix**\n\n## wux-review · codex: 🔴 block\n\n### Must-fix (1)\n- **[correctness]** `src/x.ts:7` — off by one _(raised by codex)_\n  - repro: `bun test test/x.test.ts`\n\n<sub>session `compat-block`</sub>"
+    }
+  },
+  "sessionState": {
+    "version": 1,
+    "round": 2,
+    "results": {
+      "claude": {
+        "reviewer": "claude",
+        "findings": [],
+        "verdict": "approve"
+      },
+      "codex": {
+        "reviewer": "codex",
+        "findings": [
+          {
+            "lens": "correctness",
+            "file": "src/x.ts",
+            "line": 7,
+            "severity": "must-fix",
+            "finding": "off by one",
+            "repro": "bun test test/x.test.ts"
+          }
+        ],
+        "verdict": "block"
+      }
+    },
+    "sticky": {
+      "claude": [],
+      "codex": []
+    },
+    "ledger": {
+      "claude": [],
+      "codex": []
+    }
+  },
+  "timeouts": {
+    "claude": "claude reviewer timed out after 70s (prompt 10 KB; raise WUX_REVIEW_CLAUDE_TIMEOUT_MS)",
+    "codex": "codex reviewer timed out after 70s (prompt 10 KB; raise WUX_REVIEW_CODEX_TIMEOUT_MS)"
+  },
+  "cleanup": {
+    "claude": [
+      "/tmp/compat/wuxr-compat-claude-prompt.md"
+    ],
+    "codex": [
+      "/tmp/compat/wuxr-compat-codex-prompt.md",
+      "/tmp/compat/wuxr-compat-codex-last.txt"
+    ]
+  }
+}

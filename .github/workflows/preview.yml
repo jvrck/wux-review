@@ -1,0 +1,75 @@
+name: Preview
+
+on:
+  pull_request:
+    branches: [main, "epic/**"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to build. Defaults to the workflow ref.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build preview artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ github.event.inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - name: Resolve source metadata
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(git rev-parse HEAD)"
+          short_sha="${source_sha:0:12}"
+          {
+            printf 'short_sha=%s\n' "$short_sha"
+            printf 'preview_version=0.0.0-preview.%s\n' "$short_sha"
+            printf 'artifact_name=wux-review-preview-%s\n' "$short_sha"
+          } >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.9'
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - name: Build preview binaries
+        shell: bash
+        env:
+          PREVIEW_VERSION: ${{ steps.source.outputs.preview_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          while IFS=: read -r target asset; do
+            [ -n "$target" ] || continue
+            bun build src/index.ts \
+              --compile \
+              --target="$target" \
+              --define "process.env.WUX_REVIEW_VERSION=\"$PREVIEW_VERSION\"" \
+              --outfile "dist/$asset"
+            chmod 0755 "dist/$asset"
+          done <<'EOF'
+          bun-linux-x64:wux-review-linux-x64
+          bun-linux-arm64:wux-review-linux-arm64
+          bun-darwin-arm64:wux-review-darwin-arm64
+          bun-linux-x64-musl:wux-review-linux-x64-musl
+          EOF
+          test "$(./dist/wux-review-linux-x64 --version)" = "$PREVIEW_VERSION"
+          cd dist
+          sha256sum wux-review-* > SHA256SUMS
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.source.outputs.artifact_name }}
+          path: |
+            dist/wux-review-*
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

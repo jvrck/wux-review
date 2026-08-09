@@ -1,0 +1,4 @@
+# Entries are exact repository-relative paths, one per line. Blank lines and
+# lines beginning with "#" are comments, so paths beginning with "#" cannot
+# be allowlisted. Keep this list empty unless a reviewed binary or generated
+# artifact is intentionally required in the source tree.
