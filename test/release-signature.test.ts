@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   closeSync,
-  copyFileSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -67,27 +66,53 @@ describe("Darwin release signature gate", () => {
       const root = mkdtempSync(join(tmpdir(), "wuxr-darwin-signature-"));
       const asset = join(root, "wux-review-darwin-arm64");
       try {
-        copyFileSync("/bin/echo", asset);
+        const thin = run(["/usr/bin/lipo", "/bin/echo", "-thin", "arm64e", "-output", asset]);
+        expect(thin.exitCode).toBe(0);
+
+        const thinInfo = run(["/usr/bin/lipo", "-info", asset]);
+        expect(thinInfo.exitCode).toBe(0);
+        expect(thinInfo.stdout.toString()).toContain("Non-fat file:");
+        expect(thinInfo.stdout.toString()).toContain("architecture: arm64e");
+
+        const loadCommands = run(["/usr/bin/otool", "-l", asset]);
+        expect(loadCommands.exitCode).toBe(0);
+        const textSection = loadCommands.stdout
+          .toString()
+          .match(/sectname __text\n\s+segname __TEXT\n\s+addr 0x[0-9a-f]+\n\s+size (0x[0-9a-f]+)\n\s+offset (\d+)/);
+        expect(textSection).not.toBeNull();
+        const textSize = Number.parseInt(textSection![1], 16);
+        const tamperOffset = Number.parseInt(textSection![2], 10);
+        expect(textSize).toBeGreaterThan(0);
+        expect(tamperOffset).toBeGreaterThan(0);
+
         const sign = run(["/usr/bin/codesign", "--force", "--sign", "-", asset]);
         expect(sign.exitCode).toBe(0);
+
+        const signedInfo = run(["/usr/bin/codesign", "--display", "--verbose=6", asset]);
+        expect(signedInfo.exitCode).toBe(0);
+        expect(signedInfo.stderr.toString()).toContain("Format=Mach-O thin (arm64e)");
 
         const valid = run(["bash", VERIFY_SCRIPT, asset]);
         expect(valid.exitCode).toBe(0);
         expect(valid.stdout.toString()).toContain("verification passed");
+        expect(valid.stderr.toString()).toContain("valid on disk");
 
         const handle = openSync(asset, "r+");
         try {
           const byte = Buffer.alloc(1);
-          expect(readSync(handle, byte, 0, 1, 4096)).toBe(1);
+          expect(readSync(handle, byte, 0, 1, tamperOffset)).toBe(1);
           byte[0] ^= 0xff;
-          expect(writeSync(handle, byte, 0, 1, 4096)).toBe(1);
+          expect(writeSync(handle, byte, 0, 1, tamperOffset)).toBe(1);
         } finally {
           closeSync(handle);
         }
 
         const invalid = run(["bash", VERIFY_SCRIPT, asset]);
         expect(invalid.exitCode).toBe(1);
-        expect(invalid.stderr.toString()).toContain("Darwin signature verification failed");
+        const invalidDiagnostic = invalid.stderr.toString();
+        expect(invalidDiagnostic).toContain("invalid signature (code or signature have been modified)");
+        expect(invalidDiagnostic).toContain("Darwin signature verification failed");
+        expect(invalidDiagnostic).not.toContain("An internal error has occurred");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
