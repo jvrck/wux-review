@@ -5,7 +5,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createReviewMcpServer, type McpDeps } from "../src/mcp/server";
+import type { ObservableRoundRecord, ObservableRoundStore } from "../src/review/observable-lifecycle";
+import type { BackendOptions, Reviewers } from "../src/review/reviewers";
 import type { Finding, ReviewerName, ReviewResult } from "../src/review/types";
+
+const REPORT = '```json\n{"findings":[]}\n```';
 
 function gitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "wuxr-mcp-"));
@@ -31,10 +35,11 @@ const mk = (reviewer: ReviewerName, findings: Finding[]): ReviewResult => ({
 
 function fakeReviewers(claude: Finding[], codex: Finding[]): NonNullable<McpDeps["runReviewers"]> {
   return async (_diff, _lenses, options) => {
-    const sessionId = options?.sessionId ?? "s";
-    const round = options?.round ?? 1;
-    if (options?.inspect === true) {
-      await options.prepareObservableRound?.({
+    const reviewerOptions = options ?? {};
+    const sessionId = reviewerOptions.sessionId ?? "s";
+    const round = reviewerOptions.round ?? 1;
+    if (reviewerOptions.direct !== true) {
+      await reviewerOptions.prepareObservableRound?.({
         reviewId: sessionId,
         round,
         executionId: "fakeexec",
@@ -103,26 +108,51 @@ describe("review_diff MCP server", () => {
     }
   });
 
-  test("selects observable execution by default", async () => {
+  test("omitted transport reaches observable Wux execution through the MCP pipeline boundary", async () => {
     const dir = gitRepo();
     const prevCwd = process.cwd();
     process.chdir(dir);
-    let inspect: boolean | undefined;
-    const reviewers = fakeReviewers([], []);
+    const backendOptions: BackendOptions[] = [];
+    const records: ObservableRoundRecord[] = [];
+    const roundStore: ObservableRoundStore = {
+      load: async () => undefined,
+      save: async (record) => { records.push(record); },
+      clear: async () => {},
+      prune: async () => {},
+    };
+    const reviewers: Reviewers = {
+      claude: async (_prompt, options) => {
+        backendOptions.push(options);
+        return REPORT;
+      },
+      codex: async (_prompt, options) => {
+        backendOptions.push(options);
+        return REPORT;
+      },
+    };
     try {
       await withServer(
         {
           loadConfig: async () => ({}),
-          runReviewers: async (diff, lenses, options) => {
-            inspect = options?.inspect;
-            return reviewers(diff, lenses, options);
-          },
+          backends: reviewers,
+          observableRoundStore: roundStore,
+          acquireObservableLock: async () => async () => {},
         },
         async (client) => {
           await client.callTool({ name: "review_diff", arguments: { ref: "HEAD~1" } });
         },
       );
-      expect(inspect).toBe(true);
+      expect(records.map((record) => record.state)).toEqual(["pending", "finalizing", "completed"]);
+      expect(backendOptions).toHaveLength(2);
+      expect(backendOptions.map((options) => options.direct)).toEqual([undefined, undefined]);
+      expect(backendOptions.map((options) => options.reviewId)).toEqual([
+        expect.any(String),
+        expect.any(String),
+      ]);
+      expect(backendOptions.map((options) => options.sessionName)).toEqual([
+        expect.stringMatching(/^wuxr-.+-r1-x.+-claude$/),
+        expect.stringMatching(/^wuxr-.+-r1-x.+-codex$/),
+      ]);
     } finally {
       process.chdir(prevCwd);
       rmSync(dir, { recursive: true, force: true });

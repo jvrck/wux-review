@@ -44,9 +44,9 @@ export interface ReviewInput {
   lenses?: string[];
   session?: string;
   cwd?: string;
-  // Execution mode selected by the caller. User-facing CLI/MCP callers pass
-  // observable=true by default; false is the explicit direct rollback path.
-  inspect?: boolean;
+  // Direct execution is an explicit emergency rollback. Omission is
+  // structurally observable, so new callers cannot accidentally bypass Wux.
+  direct?: boolean;
   signal?: AbortSignal;
   // Worker-supplied refutations (#101), from `--refutations <file>`. Each is keyed
   // and merged into the per-leg session ledger this round, shown to the leg, and
@@ -94,7 +94,8 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   // below persists or loads, and the review is byte-for-byte the one-shot path.
   const sessionMode = input.session !== undefined;
   const store = deps.sessionStore ?? defaultSessionStore;
-  const observableReviewId = input.inspect === true
+  const observable = input.direct !== true;
+  const observableReviewId = observable
     ? input.session ?? `obs${randomUUID().replaceAll("-", "").slice(0, 12)}`
     : input.session;
   // Every operation that can read or write a named session participates in the
@@ -153,7 +154,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
     // The shared lock excludes current direct/observable/recovery operations.
     // Keep this hash check for the narrow cross-version window where an older
     // installed direct reviewer does not yet participate in the shared lock.
-    if (input.inspect === true && sessionMode) {
+    if (observable && sessionMode) {
       const current = await loadReliableSessionState(
         input.session!,
         store,
@@ -170,13 +171,13 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
       sessionId: observableReviewId,
       persist: sessionMode,
       cwd: input.cwd,
-      inspect: input.inspect,
+      direct: input.direct,
       round,
       backends: deps.backends,
       priorFindings,
       refutationLedger: { claude: ledger.claude, codex: ledger.codex },
       signal: input.signal,
-      prepareObservableRound: input.inspect === true
+      prepareObservableRound: observable
         ? (descriptor) => serializeRecovery(async () => {
             await roundStore.prune();
             const existing = await roundStore.load(descriptor.reviewId);
@@ -221,7 +222,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
             await roundStore.save(recoveryRecord);
           })
         : undefined,
-      recordObservablePreparedChild: input.inspect === true
+      recordObservablePreparedChild: observable
         ? (reviewer, childName, attempt) => serializeRecovery(async () => {
             if (recoveryRecord === undefined) {
               throw new WuxReviewError(
@@ -238,7 +239,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
             await roundStore.save(recoveryRecord);
           })
         : undefined,
-      recordObservableEvidence: input.inspect === true
+      recordObservableEvidence: observable
         ? (record) => serializeRecovery(async () => {
             if (recoveryRecord === undefined) {
               throw new WuxReviewError(
@@ -253,7 +254,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
             await roundStore.save(recoveryRecord);
           })
         : undefined,
-      finishObservableRound: input.inspect === true
+      finishObservableRound: observable
         ? (state, diagnostic, cleanupPending) => serializeRecovery(async () => {
             if (recoveryRecord === undefined) return;
             // Successful reviewer collection is not a committed round. Keep the
@@ -286,7 +287,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
       codex,
       evidence,
     };
-    if (input.inspect !== true) {
+    if (!observable) {
       return await finalizeReviewRound(finalization, store);
     }
     if (recoveryRecord === undefined) {
@@ -364,7 +365,7 @@ function throwIfObservableReviewAborted(
   input: ReviewInput,
   phase = "before child launch",
 ): void {
-  if (input.inspect !== true || !input.signal?.aborted) return;
+  if (input.direct === true || !input.signal?.aborted) return;
   throw Object.assign(
     new WuxReviewError(`observable review interrupted ${phase}`),
     { state: "interrupted" as const },

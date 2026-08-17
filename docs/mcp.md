@@ -9,8 +9,18 @@ shim over the same `runReview` the CLI uses (no duplicated review logic).
 wux-review mcp
 ```
 Starts a stdio MCP server exposing exactly one tool, `review_diff`, and serves
-until the client disconnects. MCP reviews use the same observable-default
-pipeline as the CLI; the CLI-only `--direct` flag is the emergency rollback.
+until the client disconnects. MCP reviews rely on the same structural
+observable-default pipeline as the CLI; they do not select a transport
+themselves.
+
+### Emergency rollback decision
+
+MCP intentionally has no `direct` input or environment override. A tool caller
+that cannot establish the observable Wux boundary must fail closed instead of
+silently changing transport. Use the CLI with explicit `--direct` for a bounded
+emergency rollback; that makes the exception visible in the invoking command
+and preserves the normal prompt, parsing, timeout, retry, session, JSON,
+posting, and verdict contracts.
 
 For Claude Code, configure the server as a local stdio MCP server and make the
 server process start in the project being reviewed. Claude Code provides

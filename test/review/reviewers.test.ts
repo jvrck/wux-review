@@ -64,9 +64,10 @@ describe("runReviewers", () => {
       backends: { claude: capture("claude"), codex: capture("codex") },
       sessionId: "s1",
       models: { claude: "claude-opus-4-8", codex: "gpt-5.4" },
+      direct: true,
     });
-    expect(opts.claude).toMatchObject({ sessionName: sessionName("s1", "claude"), model: "claude-opus-4-8" });
-    expect(opts.codex).toMatchObject({ sessionName: sessionName("s1", "codex"), model: "gpt-5.4" });
+    expect(opts.claude).toMatchObject({ sessionName: sessionName("s1", "claude"), model: "claude-opus-4-8", direct: true });
+    expect(opts.codex).toMatchObject({ sessionName: sessionName("s1", "codex"), model: "gpt-5.4", direct: true });
   });
 
   test("rejects an unsafe session id override (path traversal / metacharacters)", async () => {
@@ -106,7 +107,7 @@ describe("runReviewers", () => {
       backends: { claude: capture("claude"), codex: capture("codex") },
       sessionId: "review111",
       round: 3,
-      inspect: true,
+      direct: false,
       observablePrefix: "candidate",
       observableExecutionId: "exec3",
     });
@@ -143,7 +144,7 @@ describe("runReviewers", () => {
       backends: { claude: evidenceBackend("claude"), codex: evidenceBackend("codex") },
       sessionId: "review111",
       round: 2,
-      inspect: true,
+      direct: false,
       observableExecutionId: "exec2",
     });
     expect(result.evidence?.claude).toHaveLength(1);
@@ -162,7 +163,7 @@ describe("runReviewers", () => {
         backends: { claude: backend, codex: backend },
         sessionId: "retryable",
         round: 1,
-        inspect: true,
+        direct: false,
         observableExecutionId,
       });
     }
@@ -180,7 +181,7 @@ describe("runReviewers", () => {
     await expect(
       runReviewers(DIFF, DEFAULT_LENSES, {
         backends: { claude: backend, codex: backend },
-        inspect: true,
+        direct: false,
         observablePrefix: "../bad",
       }),
     ).rejects.toThrow("invalid observable prefix");
@@ -189,7 +190,7 @@ describe("runReviewers", () => {
     await expect(
       runReviewers(DIFF, DEFAULT_LENSES, {
         backends: { claude: backend, codex: backend },
-        inspect: true,
+        direct: false,
         observableExecutionId: "../bad",
       }),
     ).rejects.toThrow("invalid observable execution id");
@@ -199,6 +200,7 @@ describe("runReviewers", () => {
       runReviewers(DIFF, DEFAULT_LENSES, {
         backends: { claude: backend, codex: backend },
         observablePrefix: "../ignored",
+        direct: true,
       }),
     ).resolves.toBeDefined();
   });
@@ -236,7 +238,7 @@ describe("runReviewers", () => {
         },
         codex: sibling,
       },
-      inspect: true,
+      direct: false,
       observableExecutionId: "cleanup",
       finishObservableRound: async (state) => void states.push(state),
     })).rejects.toThrow("claude reviewer failed to run: primary failed");
@@ -252,7 +254,7 @@ describe("runReviewers", () => {
         },
         codex: async () => APPROVE,
       },
-      inspect: true,
+      direct: false,
       observableExecutionId: "journalfail",
       finishObservableRound: async () => {
         throw new Error("round journal ENOSPC");
@@ -274,7 +276,7 @@ describe("runReviewers", () => {
           );
         },
       },
-      inspect: true,
+      direct: false,
       observableExecutionId: "cleanuppending",
       finishObservableRound: async (state, _diagnostic, cleanupPending) => {
         terminal.push({ state, cleanupPending });
@@ -299,7 +301,7 @@ describe("runReviewers", () => {
         },
         codex: async () => APPROVE,
       },
-      inspect: true,
+      direct: false,
       observableExecutionId: "cleanupinterrupt",
       signal: parent.signal,
       finishObservableRound: async (state, _diagnostic, cleanupPending) => {
@@ -332,7 +334,7 @@ describe("runReviewers", () => {
         },
         codex: sibling,
       },
-      inspect: true,
+      direct: false,
       sessionId: "cleanupnotice",
       observableExecutionId: "cleanupnotice",
     })).rejects.toThrow(
@@ -348,7 +350,7 @@ describe("runReviewers", () => {
     };
     await expect(runReviewers(DIFF, DEFAULT_LENSES, {
       backends: { claude: backend, codex: backend },
-      inspect: true,
+      direct: false,
       signal: abort.signal,
       observableExecutionId: "intjournalfail",
       finishObservableRound: async () => {
@@ -368,7 +370,7 @@ describe("runReviewers", () => {
     };
     await expect(runReviewers(DIFF, DEFAULT_LENSES, {
       backends: { claude: backend, codex: backend },
-      inspect: true,
+      direct: false,
       signal: abort.signal,
       prepareObservableRound: async () => {
         prepareCalls++;

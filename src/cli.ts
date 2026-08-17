@@ -79,7 +79,7 @@ export interface ReviewOptions {
   postToPr?: number;
   session?: string;
   endSession?: boolean;
-  inspect: boolean;
+  direct: boolean;
   refutations?: string;
   json: boolean;
 }
@@ -187,7 +187,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
   // malformed file fails fast with a typed error (it's explicit operator input).
   const refutations = opts.refutations !== undefined ? await loadRefutations(opts.refutations) : undefined;
 
-  const interrupt = opts.inspect === true ? new AbortController() : undefined;
+  const interrupt = opts.direct !== true ? new AbortController() : undefined;
   const interruptParent = () => interrupt?.abort("parent-interrupted");
   if (interrupt !== undefined) {
     process.once("SIGINT", interruptParent);
@@ -201,7 +201,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
         pr: opts.pr,
         lenses: opts.lenses,
         session: opts.session,
-        inspect: opts.inspect,
+        direct: opts.direct,
         refutations,
         signal: interrupt?.signal,
       },
@@ -269,7 +269,7 @@ function parseReconcileArgs(argv: string[]): {
 }
 
 export function parseReviewArgs(argv: string[]): ReviewOptions {
-  const opts: ReviewOptions = { inspect: true, json: !process.stdout.isTTY };
+  const opts: ReviewOptions = { direct: false, json: !process.stdout.isTTY };
   let executionMode: "observable" | "direct" | undefined;
   let i = 0;
   while (i < argv.length) {
@@ -306,14 +306,14 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
           throw new WuxReviewError("--inspect and --direct are mutually exclusive");
         }
         executionMode = "observable";
-        opts.inspect = true;
+        opts.direct = false;
         break;
       case "--direct":
         if (executionMode === "observable") {
           throw new WuxReviewError("--inspect and --direct are mutually exclusive");
         }
         executionMode = "direct";
-        opts.inspect = false;
+        opts.direct = true;
         break;
       case "--json":
         opts.json = true;

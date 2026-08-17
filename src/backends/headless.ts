@@ -796,7 +796,7 @@ async function execLeg(
   input: ExecLegInput,
 ): Promise<HeadlessRunResult> {
   const cwd = input.cwd;
-  if (opts.inspect === true) {
+  if (opts.direct !== true) {
     const attempt = input.attempt ?? 1;
     const childName = attempt === 1 ? opts.sessionName : `${opts.sessionName}-a${attempt}`;
     const recordPreparedChild = opts.recordPreparedChild;
@@ -917,7 +917,7 @@ export function createClaudeHeadlessBackend(overrides: Partial<HeadlessBackendDe
           cwd: reviewerCwd.path,
         });
       } catch (error) {
-        observableCleanupTransferred = opts.inspect === true
+        observableCleanupTransferred = opts.direct !== true
           && opts.signal?.aborted === true
           && opts.signal.reason === "parent-interrupted"
           && observableEvidenceRecorded
@@ -927,7 +927,7 @@ export function createClaudeHeadlessBackend(overrides: Partial<HeadlessBackendDe
       }
       if (result.timedOut) {
         const message = timeoutMessage("claude", timeoutMs, promptBytes, deps.claudeMaxTimeoutMs);
-        throw opts.inspect === true
+        throw opts.direct !== true
           ? new ObservableLifecycleError(message, "timed_out")
           : new WuxReviewError(message);
       }
@@ -947,7 +947,7 @@ export function createClaudeHeadlessBackend(overrides: Partial<HeadlessBackendDe
           && result.stdoutTailStartsAtLineBoundary !== true,
       );
     } finally {
-      const wrapperOwnsInterruptedCleanup = opts.inspect === true
+      const wrapperOwnsInterruptedCleanup = opts.direct !== true
         && observableCleanupTransferred;
       if (!wrapperOwnsInterruptedCleanup) {
         await reviewerCwd?.cleanup();
@@ -1130,7 +1130,7 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               cwd: reviewerCwd.path,
             });
           } catch (error) {
-            observableCleanupTransferred = opts.inspect === true
+            observableCleanupTransferred = opts.direct !== true
               && opts.signal?.aborted === true
               && opts.signal.reason === "parent-interrupted"
               && observableEvidenceRecorded
@@ -1142,7 +1142,7 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           // the wait, so surface it as a typed error immediately (never retried).
           if (result.timedOut) {
             const message = timeoutMessage("codex", timeoutMs, promptBytes, deps.maxTimeoutMs);
-            throw opts.inspect === true
+            throw opts.direct !== true
               ? new ObservableLifecycleError(message, "timed_out")
               : new WuxReviewError(message);
           }
@@ -1151,7 +1151,7 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           // output into `structuredOutput`; never reach around that contract to
           // read the temporary output file directly.
           const last = result.code === 0
-            ? opts.inspect === true
+            ? opts.direct !== true
               ? result.structuredOutput
               : await deps.readFile(outPath)
             : undefined;
@@ -1183,7 +1183,7 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
       } finally {
         const cleanupPath = home?.observableCleanupPath
           ?? reviewerCwd?.observableCleanupPath;
-        const wrapperOwnsInterruptedCleanup = opts.inspect === true
+        const wrapperOwnsInterruptedCleanup = opts.direct !== true
           && observableCleanupTransferred
           && cleanupPath !== undefined;
         if (!wrapperOwnsInterruptedCleanup) {
@@ -1194,7 +1194,7 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
     } finally {
       // Both the diff-bearing prompt and the verdict file are removed on every
       // exit path — neither should linger in the temp dir.
-      const wrapperOwnsInterruptedCleanup = opts.inspect === true
+      const wrapperOwnsInterruptedCleanup = opts.direct !== true
         && observableCleanupTransferred;
       if (!wrapperOwnsInterruptedCleanup) {
         await deps.rm(promptPath);

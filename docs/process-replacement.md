@@ -87,7 +87,10 @@ The manual interactive Wux dual-review is no longer required for every PR.
   direct-headless rollback.
 - **Portable skill:** invokes the CLI; capture stdout before branching on status.
 - **Claude MCP:** `wux-review mcp` exposes `review_diff`; a blocked review returns
-  a successful tool result with `verdict: "block"` (no CLI-style exit `2`).
+  a successful tool result with `verdict: "block"` (no CLI-style exit `2`). MCP
+  intentionally has no direct-rollback field or environment override: an
+  unavailable observable boundary fails closed, while an operator can make an
+  explicit, auditable CLI `--direct` rollback when needed.
 - **Codex MCP:** unsupported; Codex callers use the CLI or portable skill.
 - **Default / `--inspect`:** observable execution runs each unchanged headless
   leg inside a fresh `wux run shell` session and requires its durable atomic
