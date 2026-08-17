@@ -66,6 +66,10 @@ jobs:
             chmod 0755 "$ASSET"
           )
           printf 'asset_dir=%s\n' "$asset_dir" >> "$GITHUB_OUTPUT"
+      - name: Verify Darwin signature
+        if: matrix.asset == 'wux-review-darwin-arm64'
+        shell: bash
+        run: scripts/verify-darwin-signature.sh "${{ steps.release.outputs.asset_dir }}/$ASSET"
       - name: Verify version and smoke
         shell: bash
         run: |

@@ -11,6 +11,9 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+- **Verified Darwin releases.** Darwin ARM64 release binaries are now explicitly
+  ad-hoc signed on macOS and must pass signature verification before upload,
+  native validation, checksum generation, and publication.
 - **Dependabot remediation.** Bun dependencies and GitHub Actions now receive
   grouped weekly patch/minor maintenance PRs, while eligible vulnerability fixes
   are proposed immediately and routine major upgrades remain deliberate work.
