@@ -252,8 +252,11 @@ printf 'corrupted\n' >> "$release_dir/$asset"
 if run_install "$bin_rollback" "$skills_dir/rollback" latest > "$root/rollback.out" 2> "$root/rollback.err"; then
   die "expected checksum-mismatch install to fail"
 fi
-cmp -s "$SOURCE_BIN" "$bin_rollback/wux-review" \
-  || die "checksum failure replaced the working binary"
+if command -v sha256sum >/dev/null 2>&1; then
+  test "$(sha256sum < "$SOURCE_BIN")" = "$(sha256sum < "$bin_rollback/wux-review")"
+else
+  test "$(shasum -a 256 < "$SOURCE_BIN")" = "$(shasum -a 256 < "$bin_rollback/wux-review")"
+fi || die "checksum failure replaced the working binary"
 grep -Eq 'FAILED|NOT match|mismatch|checksum|no properly formatted SHA checksum lines found' "$root/rollback.err" \
   || die "checksum failure did not report an actionable error"
 

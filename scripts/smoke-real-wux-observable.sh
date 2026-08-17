@@ -8,7 +8,7 @@ die() { printf 'wux-review real-Wux observable smoke: %s\n' "$*" >&2; exit 1; }
 
 WUX_REVIEW_BIN="${WUX_REVIEW_BIN:-}"
 WUX_REAL_SMOKE_WUX_BIN="${WUX_REAL_SMOKE_WUX_BIN:-wux}"
-WUX_REAL_SMOKE_WUX_VERSION="${WUX_REAL_SMOKE_WUX_VERSION:-2026.06.21.1}"
+WUX_REAL_SMOKE_WUX_VERSION="${WUX_REAL_SMOKE_WUX_VERSION:-2026.08.17}"
 ROOT_INPUT="${WUX_REAL_SMOKE_ROOT:-}"
 DIAG_DIR="${WUX_REAL_SMOKE_DIAG_DIR:-}"
 TMP_REVIEW_DIR="/tmp/wux-review"
@@ -144,7 +144,7 @@ fi
 result="$(printf '```json\n{"findings":%s}\n```' "$findings")"
 jq -nc '{type:"system",subtype:"init",session_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"assistant",message:{content:[{type:"tool_use",name:"Read",input:{file_path:"/safe/fake"}}]}}'
-sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-10}"
+sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:?}"
 jq -nc --arg r "$result" '{type:"result",subtype:"success",is_error:false,result:$r}'
 EOF
 
@@ -174,7 +174,7 @@ else
 fi
 jq -nc '{type:"thread.started",thread_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"turn.started"}'
-sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-10}"
+sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:?}"
 jq -nc '{type:"turn.completed"}'
 printf '```json\n{"findings":%s}\n```\n' "$findings" > "$out"
 EOF
@@ -199,10 +199,21 @@ call_count() {
 
 wait_visible() {
   local session="$1" deadline=$((SECONDS + 5)) last_status_failure=""
+  local status_stderr_file="$root/wux-status-stderr"
   while [ "$SECONDS" -le "$deadline" ]; do
-    local status
-    if ! status="$(PATH="$smoke_path" wux --local status --json 2>&1)"; then
-      last_status_failure="$status"
+    local status status_exit status_stderr
+    if status="$(PATH="$smoke_path" wux --local status --json 2> "$status_stderr_file")"; then
+      last_status_failure=""
+    else
+      status_exit="$?"
+      status_stderr="$(< "$status_stderr_file")"
+      if [ -n "$status_stderr" ]; then
+        last_status_failure="${status_stderr:0:1000}"
+      elif [ -n "$status" ]; then
+        last_status_failure="exit $status_exit; stdout: ${status:0:1000}"
+      else
+        last_status_failure="exit $status_exit"
+      fi
       sleep 0.1
       continue
     fi

@@ -31,6 +31,11 @@ jobs:
             adfd7d347f02e805980f4abcbf42fbbb92dff2cb102e0ef58c70ac5a9e086177 \
             "${{ runner.temp }}/wux-install.sh" | sha256sum -c -
           bash "${{ runner.temp }}/wux-install.sh"
+      - name: Run focused real-Wux observable tests against exact fixtures
+        env:
+          WUX_REAL_SMOKE_TEST_WUX_BIN: ${{ runner.temp }}/wux-owner-contract-bin/wux
+          WUX_REAL_SMOKE_TEST_REVIEW_BIN: ${{ github.workspace }}/dist/wux-review
+        run: bun test test/smoke-real-wux-observable.test.ts
       - name: Verify the released Wux cleanup-actor contract
         env:
           WUX_OWNER_CONTRACT_BIN: ${{ runner.temp }}/wux-owner-contract-bin/wux
