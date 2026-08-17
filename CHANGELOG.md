@@ -11,6 +11,9 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+- **Dependabot remediation.** Bun dependencies and GitHub Actions now receive
+  grouped weekly patch/minor maintenance PRs, while eligible vulnerability fixes
+  are proposed immediately and routine major upgrades remain deliberate work.
 - **Structural observable default.** The shared pipeline, reviewer layer, and
   headless backends now select observable Wux execution when no transport is
   specified. Direct execution requires the explicit `--direct` rollback, with
