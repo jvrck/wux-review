@@ -17,6 +17,11 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   prompts, retries, timeouts, session/refutation behavior, JSON, posting, and
   verdict semantics unchanged. MCP intentionally remains observable-only; use
   the CLI when an emergency direct rollback is required.
+- **Programmatic transport rename.** Exported `inspect` fields on `ReviewInput`,
+  `RunReviewersOptions`, and `BackendOptions` are now `direct`. This is a
+  source-compatible-breaking rename for programmatic callers: update option
+  objects before upgrading, because a runtime object that still supplies
+  `inspect` is ignored and therefore selects the new observable default.
 
 ## 2026.08.09
 

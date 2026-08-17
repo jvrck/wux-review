@@ -57,18 +57,18 @@ interface Opts {
   homeDiagnostics?: string[];
   // Inject a precise isolated-home setup failure.
   prepareError?: string;
-  // Observable execution controls the Wux-shell launch result, the captured stdout the
-  // wrapper writes (claude reads its envelope from there), and the leg exit code
-  // the completion marker carries.
+  // Observable execution controls the Wux-shell launch result, captured stdout
+  // the wrapper writes (Claude reads its envelope there), and the completion
+  // marker's leg exit code.
   wuxLaunchCode?: number;
   wuxLaunchTimedOut?: boolean;
   wuxLaunchThrows?: boolean;
-  inspectCapture?: string;
-  inspectCaptureErr?: string;
-  inspectExitCode?: string;
-  inspectExitCodes?: string[];
+  observableCapture?: string;
+  observableCaptureErr?: string;
+  observableExitCode?: string;
+  observableExitCodes?: string[];
   abortOnStop?: AbortController;
-  inspectCleanupPath?: string;
+  observableCleanupPath?: string;
 }
 
 function harness(opts: Opts = {}) {
@@ -175,12 +175,12 @@ function harness(opts: Opts = {}) {
       if (path.endsWith("-observable-ready")) {
         const stem = path.slice(0, -"-observable-ready".length);
         const childName = stem.slice(stem.lastIndexOf("/") + 1);
-        files.set(`${stem}-observable-stdout`, opts.inspectCapture ?? claudeEnvelope(REPORT));
-        files.set(`${stem}-observable-stderr`, opts.inspectCaptureErr ?? "");
+        files.set(`${stem}-observable-stdout`, opts.observableCapture ?? claudeEnvelope(REPORT));
+        files.set(`${stem}-observable-stderr`, opts.observableCaptureErr ?? "");
         const attempt = Number(childName.match(/-a([0-9]+)$/)?.[1] ?? "1");
         files.set(
           `${stem}-observable-done`,
-          opts.inspectExitCodes?.[attempt - 1] ?? opts.inspectExitCode ?? "0",
+          opts.observableExitCodes?.[attempt - 1] ?? opts.observableExitCode ?? "0",
         );
         const baseChild = childName.replace(/-a[0-9]+$/, "");
         if (!opts.lastMessageMissing) {
@@ -222,9 +222,9 @@ function harness(opts: Opts = {}) {
         cleanup: async () => {
           cleanupCalls++;
         },
-        ...(opts.inspectCleanupPath === undefined
+        ...(opts.observableCleanupPath === undefined
           ? {}
-          : { observableCleanupPath: opts.inspectCleanupPath }),
+          : { observableCleanupPath: opts.observableCleanupPath }),
       };
     },
     prepareReviewerCwd: async (parentDir) => {
@@ -271,12 +271,12 @@ function harness(opts: Opts = {}) {
         if (path.endsWith("-observable-ready")) {
           const stem = path.slice(0, -"-observable-ready".length);
           const childName = stem.slice(stem.lastIndexOf("/") + 1);
-          files.set(`${stem}-observable-stdout`, opts.inspectCapture ?? claudeEnvelope(REPORT));
-          files.set(`${stem}-observable-stderr`, opts.inspectCaptureErr ?? "");
+          files.set(`${stem}-observable-stdout`, opts.observableCapture ?? claudeEnvelope(REPORT));
+          files.set(`${stem}-observable-stderr`, opts.observableCaptureErr ?? "");
           const attempt = Number(childName.match(/-a([0-9]+)$/)?.[1] ?? "1");
           files.set(
             `${stem}-observable-done`,
-            opts.inspectExitCodes?.[attempt - 1] ?? opts.inspectExitCode ?? "0",
+            opts.observableExitCodes?.[attempt - 1] ?? opts.observableExitCode ?? "0",
           );
           const baseChild = childName.replace(/-a[0-9]+$/, "");
           if (!opts.lastMessageMissing) {
@@ -844,7 +844,7 @@ describe("observable Wux adapter", () => {
   });
 
   test("a non-zero in-session exit surfaces as a leg failure (exit-code parity with the direct path)", async () => {
-    const { deps } = harness({ inspectExitCode: "1", inspectCapture: "claude: auth required" });
+    const { deps } = harness({ observableExitCode: "1", observableCapture: "claude: auth required" });
     await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: false })).rejects.toThrow(
       "claude -p failed: exit 1",
     );
@@ -852,7 +852,7 @@ describe("observable Wux adapter", () => {
 
   test("an observable timeout preserves its typed timed_out lifecycle state", async () => {
     const { deps } = harness({
-      inspectExitCode: "__WUX_REVIEW_TIMEOUT__",
+      observableExitCode: "__WUX_REVIEW_TIMEOUT__",
       lastMessageMissing: true,
     });
     const error = await createCodexHeadlessBackend(deps)("P", {
@@ -865,7 +865,7 @@ describe("observable Wux adapter", () => {
 
   test("a Claude observable timeout preserves its typed timed_out lifecycle state", async () => {
     const { deps } = harness({
-      inspectExitCode: "__WUX_REVIEW_TIMEOUT__",
+      observableExitCode: "__WUX_REVIEW_TIMEOUT__",
     });
     const error = await createClaudeHeadlessBackend(deps)("P", {
       sessionName: "s",
@@ -879,7 +879,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      inspectCleanupPath: join(tmpdir(), "wuxr-codex-home-test"),
+      observableCleanupPath: join(tmpdir(), "wuxr-codex-home-test"),
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
@@ -911,7 +911,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      inspectCleanupPath: join(tmpdir(), "wuxr-codex-home-test"),
+      observableCleanupPath: join(tmpdir(), "wuxr-codex-home-test"),
       abortOnStop: abort,
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
@@ -928,7 +928,7 @@ describe("observable Wux adapter", () => {
   test("leg stderr is kept separate from stdout, so a stderr warning doesn't break JSON parsing", async () => {
     // The captured stdout is a clean envelope; the captured stderr is noise. Under
     // the old `2>&1` merge this would corrupt the JSON; kept separate, it parses.
-    const { deps } = harness({ inspectCapture: claudeEnvelope(REPORT), inspectCaptureErr: "Warning: telemetry notice\n" });
+    const { deps } = harness({ observableCapture: claudeEnvelope(REPORT), observableCaptureErr: "Warning: telemetry notice\n" });
     const out = await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: false });
     expect(out).toBe(REPORT);
   });
@@ -1943,7 +1943,7 @@ describe("codex leg: bounded retry with backoff", () => {
     const h = harness({
       codexRetries: 1,
       codexRetryBaseMs: 1,
-      inspectExitCodes: ["1", "0"],
+      observableExitCodes: ["1", "0"],
     });
     const prepared: { childName: string; attempt: number }[] = [];
     await expect(createCodexHeadlessBackend(h.deps)("P", {

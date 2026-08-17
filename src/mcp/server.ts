@@ -3,7 +3,8 @@ import type { VerdictEnvelope } from "../review/consolidate";
 import type { loadConfig } from "../review/config";
 import type { Lens } from "../review/lenses";
 import type { PostResult } from "../review/post";
-import type { DualReviewResult, RunReviewersOptions } from "../review/reviewers";
+import type { DualReviewResult, Reviewers, RunReviewersOptions } from "../review/reviewers";
+import type { ObservableRoundStore } from "../review/observable-lifecycle";
 import { VERSION } from "../version";
 import { registerReviewDiff } from "./tools/review_diff";
 
@@ -11,6 +12,11 @@ import { registerReviewDiff } from "./tools/review_diff";
 // in-memory transport without spawning live model sessions.
 export interface McpDeps {
   runReviewers?: (diff: string, lenses: Lens[], options?: RunReviewersOptions) => Promise<DualReviewResult>;
+  // Lower-level seams let the MCP boundary test exercise the shared pipeline
+  // with the real reviewer dispatcher, while keeping model execution mocked.
+  backends?: Reviewers;
+  observableRoundStore?: ObservableRoundStore;
+  acquireObservableLock?: (reviewId: string) => Promise<() => Promise<void>>;
   // `| void` keeps the pre-#100 `Promise<void>` seam backward-compatible; the MCP
   // tool ignores the return value (it only cares that the post ran).
   postToPr?: (pr: number, envelope: VerdictEnvelope) => Promise<PostResult[] | void>;

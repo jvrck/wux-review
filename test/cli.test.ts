@@ -54,17 +54,18 @@ function fakeReviewers(
   const verdictOf = (findings: Finding[]) => (findings.some((x) => x.severity === "must-fix") ? "block" : "approve");
   const mk = (reviewer: ReviewerName, findings: Finding[]): ReviewResult => ({ reviewer, findings, verdict: verdictOf(findings) });
   return async (_diff, lenses, options) => {
+    const reviewerOptions = options ?? {};
     if (capture) {
       capture.lenses = lenses.map((l) => l.name);
-      capture.models = options?.models;
-      capture.sessionId = options?.sessionId;
-      capture.persist = options?.persist;
-      capture.direct = options?.direct;
+      capture.models = reviewerOptions.models;
+      capture.sessionId = reviewerOptions.sessionId;
+      capture.persist = reviewerOptions.persist;
+      capture.direct = reviewerOptions.direct;
     }
-    if (options?.direct !== true) {
-      const sessionId = options!.sessionId ?? "test-session";
-      const round = options!.round ?? 1;
-      await options!.prepareObservableRound?.({
+    if (reviewerOptions.direct !== true) {
+      const sessionId = reviewerOptions.sessionId ?? "test-session";
+      const round = reviewerOptions.round ?? 1;
+      await reviewerOptions.prepareObservableRound?.({
         reviewId: sessionId,
         round,
         executionId: "fakeexec",
@@ -73,7 +74,7 @@ function fakeReviewers(
       });
     }
     return {
-      sessionId: options?.sessionId ?? "test-session",
+      sessionId: reviewerOptions.sessionId ?? "test-session",
       claude: mk("claude", claudeFindings),
       codex: mk("codex", codexFindings),
     };
@@ -502,11 +503,12 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       let seenLedger: { claude?: unknown[]; codex?: { evidence: string }[] } | undefined;
       await callCli(["HEAD~1", "--json", "--session", "sref", "--refutations", refPath], dir, {
         runReviewers: async (_diff, _lenses, options) => {
-          seenLedger = options?.refutationLedger;
-          if (options?.direct !== true) {
-            await options!.prepareObservableRound?.({
-              reviewId: options!.sessionId ?? "sref",
-              round: options!.round ?? 1,
+          const reviewerOptions = options ?? {};
+          seenLedger = reviewerOptions.refutationLedger;
+          if (reviewerOptions.direct !== true) {
+            await reviewerOptions.prepareObservableRound?.({
+              reviewId: reviewerOptions.sessionId ?? "sref",
+              round: reviewerOptions.round ?? 1,
               executionId: "fakeexec",
               claudeChildName: "wuxr-sref-r1-xfakeexec-claude",
               codexChildName: "wuxr-sref-r1-xfakeexec-codex",

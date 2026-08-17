@@ -31,7 +31,13 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
     async ({ ref, pr, lenses, post_to_pr, session }) => {
       const envelope = await runReview(
         { ref, pr, lenses, session },
-        { runReviewers: deps.runReviewers, loadConfig: deps.loadConfig },
+        {
+          runReviewers: deps.runReviewers,
+          loadConfig: deps.loadConfig,
+          backends: deps.backends,
+          observableRoundStore: deps.observableRoundStore,
+          acquireObservableLock: deps.acquireObservableLock,
+        },
       );
 
       if (post_to_pr !== undefined) {
