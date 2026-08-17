@@ -28,6 +28,22 @@ adversarial verification are documented in the
 - `.trivyignore.yaml` — Trivy suppressions (none active).
 Every suppression must carry an advisory id, owner, tracking note, and expiry.
 
+## Dependabot remediation
+
+Dependabot complements these detection and merge gates with a repair path.
+Vulnerability alerts create security update PRs as soon as GitHub identifies an
+eligible vulnerable dependency; automated security fixes are enabled for those
+alerts. These security PRs are not deferred to the routine weekly schedule.
+
+Routine dependency maintenance is configured in
+`.github/dependabot.yml`. Dependabot groups Bun and GitHub Actions patch/minor
+updates into one PR per ecosystem each Monday in `Australia/Sydney`. Routine
+major upgrades are ignored so they remain deliberate human work. The routine
+major filter does not prevent eligible security updates from being proposed.
+
+Dependabot PRs receive the same review and CI/security gates as other changes.
+Dependabot does not automatically merge PRs.
+
 ## License compatibility
 
 `wux-review` is MIT licensed. The `security-gate` job and local
