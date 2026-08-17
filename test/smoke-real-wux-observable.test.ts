@@ -40,11 +40,16 @@ test("real-Wux smoke parses as shell", () => {
 
 test("real-Wux version drift explicitly skips with non-success status", () => {
   const root = mkdtempSync(join(tmpdir(), "wux-review smoke mismatch-"));
+  const commands = join(root, "commands");
   const fakeWux = join(root, "wux");
+  mkdirSync(commands);
+  for (const command of ["git", "jq", "tmux"])
+    makeExecutable(join(commands, command), "#!/bin/sh\nexit 0\n");
   makeExecutable(fakeWux, "#!/usr/bin/env bash\nprintf '1.2.3\\n'\n");
 
   try {
     const result = run(["bash", smokeScript], {
+      PATH: `${commands}:${process.env.PATH ?? ""}`,
       WUX_REVIEW_BIN: "/usr/bin/true",
       WUX_REAL_SMOKE_WUX_BIN: fakeWux,
       WUX_REAL_SMOKE_WUX_VERSION: "2026.08.17",
