@@ -120,7 +120,7 @@ trap cleanup EXIT
 
 actual_wux_version="$(wux --version)"
 [ "$actual_wux_version" = "$WUX_REAL_SMOKE_WUX_VERSION" ] || \
-  { note "wux-review real-Wux observable smoke: SKIP: expected Wux $WUX_REAL_SMOKE_WUX_VERSION, got $actual_wux_version"; exit 0; }
+  { note "wux-review real-Wux observable smoke: SKIP: expected Wux $WUX_REAL_SMOKE_WUX_VERSION, got $actual_wux_version"; exit 77; }
 
 # wux-review invokes `wux` by name. Keep the actual released binary explicit
 # while putting deterministic reviewer fakes ahead of the ambient PATH.
@@ -144,7 +144,7 @@ fi
 result="$(printf '```json\n{"findings":%s}\n```' "$findings")"
 jq -nc '{type:"system",subtype:"init",session_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"assistant",message:{content:[{type:"tool_use",name:"Read",input:{file_path:"/safe/fake"}}]}}'
-sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-5}"
+sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-10}"
 jq -nc --arg r "$result" '{type:"result",subtype:"success",is_error:false,result:$r}'
 EOF
 
@@ -174,7 +174,7 @@ else
 fi
 jq -nc '{type:"thread.started",thread_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"turn.started"}'
-sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-5}"
+sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-10}"
 jq -nc '{type:"turn.completed"}'
 printf '```json\n{"findings":%s}\n```\n' "$findings" > "$out"
 EOF
@@ -198,10 +198,11 @@ call_count() {
 }
 
 wait_visible() {
-  local session="$1" deadline=$((SECONDS + 5))
+  local session="$1" deadline=$((SECONDS + 5)) last_status_failure=""
   while [ "$SECONDS" -le "$deadline" ]; do
     local status
-    if ! status="$(PATH="$smoke_path" wux --local status --json)"; then
+    if ! status="$(PATH="$smoke_path" wux --local status --json 2>&1)"; then
+      last_status_failure="$status"
       sleep 0.1
       continue
     fi
@@ -214,6 +215,9 @@ wait_visible() {
     fi
     sleep 0.1
   done
+  if [ -n "$last_status_failure" ]; then
+    die "$session did not expose both reviewer sessions within five seconds; last wux status failure: $last_status_failure"
+  fi
   die "$session did not expose both reviewer sessions within five seconds"
 }
 
@@ -303,7 +307,7 @@ assert_terminal_evidence "$block_session" completed
 
 note "real-Wux observable smoke: interrupted parent + zero-call reconcile"
 before="$(call_count)"
-start_review "$interrupt_session" APPROVE_CASE interrupted 8
+start_review "$interrupt_session" APPROVE_CASE interrupted 12
 interrupt_pid="$REVIEW_PID"
 wait_visible "$interrupt_session"
 kill -TERM "$interrupt_pid"
@@ -313,7 +317,7 @@ grep -q 'reconcile' "$output_dir/interrupted.err" || die "interruption did not n
 # The detached reviewer wrappers finish their deterministic calls after the
 # parent has retained the exact recovery identity. Reconcile then consumes only
 # those durable/transient bytes; it must not launch either fake again.
-deadline=$((SECONDS + 15))
+deadline=$((SECONDS + 30))
 while [ "$SECONDS" -le "$deadline" ]; do
   if [ "$(call_count)" -eq "$((before + 2))" ] && \
     ! PATH="$smoke_path" wux --local status --json | jq -e --arg prefix "$run_prefix-$interrupt_session-r1-x" \
