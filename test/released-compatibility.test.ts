@@ -182,7 +182,7 @@ async function envelopeFor(
     backends,
     sessionId: `compat-${scenario}`,
     round,
-    inspect: mode === "observable",
+    direct: mode === "direct",
   });
   const envelope = consolidate(result.claude, result.codex, result.sessionId);
   envelope.round = round;
@@ -259,7 +259,7 @@ describe("released 2026.07.28 compatibility fixtures", () => {
       await createClaudeHeadlessBackend({
         ...common,
         rm: async (path) => void cleanup.claude.push(path),
-      })(prompt, { sessionName: "wuxr-compat-claude" });
+      })(prompt, { sessionName: "wuxr-compat-claude", direct: true });
     } catch (err) {
       claudeError = (err as Error).message;
     }
@@ -268,7 +268,7 @@ describe("released 2026.07.28 compatibility fixtures", () => {
       await createCodexHeadlessBackend({
         ...common,
         rm: async (path) => void cleanup.codex.push(path),
-      })(prompt, { sessionName: "wuxr-compat-codex" });
+      })(prompt, { sessionName: "wuxr-compat-codex", direct: true });
     } catch (err) {
       codexError = (err as Error).message;
     }

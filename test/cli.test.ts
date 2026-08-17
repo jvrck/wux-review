@@ -43,7 +43,7 @@ interface Capture {
   models?: { claude?: string; codex?: string };
   sessionId?: string;
   persist?: boolean;
-  inspect?: boolean;
+  direct?: boolean;
 }
 
 function fakeReviewers(
@@ -59,12 +59,12 @@ function fakeReviewers(
       capture.models = options?.models;
       capture.sessionId = options?.sessionId;
       capture.persist = options?.persist;
-      capture.inspect = options?.inspect;
+      capture.direct = options?.direct;
     }
-    if (options?.inspect === true) {
-      const sessionId = options.sessionId ?? "test-session";
-      const round = options.round ?? 1;
-      await options.prepareObservableRound?.({
+    if (options?.direct !== true) {
+      const sessionId = options!.sessionId ?? "test-session";
+      const round = options!.round ?? 1;
+      await options!.prepareObservableRound?.({
         reviewId: sessionId,
         round,
         executionId: "fakeexec",
@@ -297,13 +297,13 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       await callCli(["HEAD~1", "--json"], dir, {
         runReviewers: fakeReviewers([], [], observable),
       });
-      expect(observable.inspect).toBe(true);
+      expect(observable.direct).toBe(false);
 
       const direct: Capture = { lenses: [] };
       await callCli(["HEAD~1", "--direct", "--json"], dir, {
         runReviewers: fakeReviewers([], [], direct),
       });
-      expect(direct.inspect).toBe(false);
+      expect(direct.direct).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -500,9 +500,18 @@ describe("review pipeline (in-process, injected reviewers)", () => {
         JSON.stringify([{ reviewer: "codex", file: "a.ts", line: 1, lens: "security", finding: "wrong", evidence: "node -e ok; CI green" }]),
       );
       let seenLedger: { claude?: unknown[]; codex?: { evidence: string }[] } | undefined;
-      await callCli(["HEAD~1", "--json", "--direct", "--session", "sref", "--refutations", refPath], dir, {
+      await callCli(["HEAD~1", "--json", "--session", "sref", "--refutations", refPath], dir, {
         runReviewers: async (_diff, _lenses, options) => {
           seenLedger = options?.refutationLedger;
+          if (options?.direct !== true) {
+            await options!.prepareObservableRound?.({
+              reviewId: options!.sessionId ?? "sref",
+              round: options!.round ?? 1,
+              executionId: "fakeexec",
+              claudeChildName: "wuxr-sref-r1-xfakeexec-claude",
+              codexChildName: "wuxr-sref-r1-xfakeexec-codex",
+            });
+          }
           return {
             sessionId: "sref",
             claude: { reviewer: "claude", findings: [], verdict: "approve" },
@@ -595,9 +604,9 @@ describe("parseReviewArgs", () => {
   });
 
   test("observable execution is default; --direct rolls back and --inspect remains an alias", () => {
-    expect(parseReviewArgs([]).inspect).toBe(true);
-    expect(parseReviewArgs(["--inspect"]).inspect).toBe(true);
-    expect(parseReviewArgs(["--direct"]).inspect).toBe(false);
+    expect(parseReviewArgs([]).direct).toBe(false);
+    expect(parseReviewArgs(["--inspect"]).direct).toBe(false);
+    expect(parseReviewArgs(["--direct"]).direct).toBe(true);
     expect(() => parseReviewArgs(["--direct", "--inspect"])).toThrow("mutually exclusive");
     expect(() => parseReviewArgs(["--inspect", "--direct"])).toThrow("mutually exclusive");
   });

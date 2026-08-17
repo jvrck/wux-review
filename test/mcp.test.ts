@@ -33,8 +33,8 @@ function fakeReviewers(claude: Finding[], codex: Finding[]): NonNullable<McpDeps
   return async (_diff, _lenses, options) => {
     const sessionId = options?.sessionId ?? "s";
     const round = options?.round ?? 1;
-    if (options?.inspect === true) {
-      await options.prepareObservableRound?.({
+    if (options?.direct !== true) {
+      await options!.prepareObservableRound?.({
         reviewId: sessionId,
         round,
         executionId: "fakeexec",
@@ -107,14 +107,14 @@ describe("review_diff MCP server", () => {
     const dir = gitRepo();
     const prevCwd = process.cwd();
     process.chdir(dir);
-    let inspect: boolean | undefined;
+    let direct: boolean | undefined;
     const reviewers = fakeReviewers([], []);
     try {
       await withServer(
         {
           loadConfig: async () => ({}),
           runReviewers: async (diff, lenses, options) => {
-            inspect = options?.inspect;
+            direct = options?.direct;
             return reviewers(diff, lenses, options);
           },
         },
@@ -122,7 +122,7 @@ describe("review_diff MCP server", () => {
           await client.callTool({ name: "review_diff", arguments: { ref: "HEAD~1" } });
         },
       );
-      expect(inspect).toBe(true);
+      expect(direct).toBeUndefined();
     } finally {
       process.chdir(prevCwd);
       rmSync(dir, { recursive: true, force: true });

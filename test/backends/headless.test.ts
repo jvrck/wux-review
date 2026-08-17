@@ -57,7 +57,7 @@ interface Opts {
   homeDiagnostics?: string[];
   // Inject a precise isolated-home setup failure.
   prepareError?: string;
-  // --inspect controls: the wux-shell launch result, the captured stdout the
+  // Observable execution controls the Wux-shell launch result, the captured stdout the
   // wrapper writes (claude reads its envelope from there), and the leg exit code
   // the completion marker carries.
   wuxLaunchCode?: number;
@@ -344,7 +344,7 @@ function harness(opts: Opts = {}) {
 describe("createClaudeHeadlessBackend", () => {
   test("feeds the prompt via stdin to claude -p stream-json and returns the final result event", async () => {
     const { deps, runs, writes, rms, counts } = harness();
-    const out = await createClaudeHeadlessBackend(deps)("PROMPT BODY", { sessionName: "wuxr-s1-claude", cwd: "/repo" });
+    const out = await createClaudeHeadlessBackend(deps)("PROMPT BODY", { sessionName: "wuxr-s1-claude", cwd: "/repo", direct: true });
 
     expect(out).toBe(REPORT);
     expect(runs).toHaveLength(1);
@@ -386,13 +386,13 @@ describe("createClaudeHeadlessBackend", () => {
     ].join("\n");
     const { deps } = harness({ stdout });
     await expect(
-      createClaudeHeadlessBackend(deps)("P", { sessionName: "s" }),
+      createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true }),
     ).resolves.toBe(REPORT);
   });
 
   test("forwards the model flag when set", async () => {
     const { deps, runs } = harness();
-    await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", model: "claude-opus-4-8" });
+    await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", model: "claude-opus-4-8", direct: true });
     expect(runs[0]!.cmd).toEqual([
       "claude",
       "-p",
@@ -414,60 +414,60 @@ describe("createClaudeHeadlessBackend", () => {
 
   test("always uses a private per-leg cwd instead of the reviewed repository", async () => {
     const { deps, runs } = harness();
-    await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", cwd: "/malicious/repo" });
+    await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", cwd: "/malicious/repo", direct: true });
     expect(runs[0]!.opts.cwd).toBe(REVIEWER_CWD);
   });
 
   test("a timed-out leg is a clean bounded error (not silent empty), and still cleans up", async () => {
     const { deps, rms } = harness({ runResult: { timedOut: true, code: null } });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow("timed out after 1s");
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("timed out after 1s");
     expect(rms).toContain("/tmp/test/s-prompt.md");
   });
 
   test("a non-zero exit surfaces the stderr detail", async () => {
     const { deps } = harness({ runResult: { code: 1, stderr: "auth required\nrun /login" } });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "claude -p failed: auth required run /login",
     );
   });
 
   test("a failure envelope (is_error true) is a typed error with the api status", async () => {
     const errEnv = harness({ stdout: JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, api_error_status: "overloaded" }) });
-    await expect(createClaudeHeadlessBackend(errEnv.deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(errEnv.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "reported failure (overloaded)",
     );
   });
 
   test("an is_error:false envelope with a non-'success' subtype is still accepted (gate on is_error, not subtype)", async () => {
     const { deps } = harness({ stdout: claudeEnvelope(REPORT, { subtype: "success_with_followup", is_error: false }) });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).resolves.toBe(REPORT);
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).resolves.toBe(REPORT);
   });
 
   test("fails closed when is_error is missing or non-boolean (never a silent approval)", async () => {
     const missing = harness({ stdout: JSON.stringify({ type: "result", subtype: "success", result: REPORT }) });
-    await expect(createClaudeHeadlessBackend(missing.deps)("P", { sessionName: "s" })).rejects.toThrow("reported failure");
+    await expect(createClaudeHeadlessBackend(missing.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("reported failure");
 
     const nonBool = harness({ stdout: JSON.stringify({ type: "result", is_error: "false", subtype: "success", result: REPORT }) });
-    await expect(createClaudeHeadlessBackend(nonBool.deps)("P", { sessionName: "s" })).rejects.toThrow("reported failure");
+    await expect(createClaudeHeadlessBackend(nonBool.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("reported failure");
   });
 
   test("a permission denial that would silently drop the diff is a typed error", async () => {
     const denied = harness({ stdout: claudeEnvelope("ignored", { permission_denials: [{ tool: "Read" }] }) });
-    await expect(createClaudeHeadlessBackend(denied.deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(denied.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "blocked by 1 permission denial",
     );
   });
 
   test("unparseable stdout is a typed error, never a silent approval", async () => {
     const { deps } = harness({ stdout: "not json at all" });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "contained no final result event",
     );
   });
 
   test("a leading blank line without a result fails closed instead of looping", async () => {
     const { deps } = harness({ stdout: "\n{\"type\":\"system\"}\n" });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "contained no final result event",
     );
   });
@@ -479,7 +479,7 @@ describe("createClaudeHeadlessBackend", () => {
     );
     expect(Buffer.byteLength(oversized)).toBe(MACHINE_RESULT_EVENT_LIMIT_BYTES + 1);
     const { deps } = harness({ stdout: oversized });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "exceeded the 16 MiB limit",
     );
   });
@@ -494,7 +494,7 @@ describe("createClaudeHeadlessBackend", () => {
       stdout: `${exact}\r\n`,
       runResult: { stdoutTruncated: false },
     });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" }))
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true }))
       .resolves.toHaveLength(MACHINE_RESULT_EVENT_LIMIT_BYTES - emptyBytes);
   });
 
@@ -510,7 +510,7 @@ describe("createClaudeHeadlessBackend", () => {
     ).toString();
     expect(Buffer.byteLength(tail)).toBe(HEADLESS_DEFAULT_STDOUT_TAIL_BYTES);
     const { deps } = harness({ stdout: tail });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" }))
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true }))
       .rejects.toThrow("contained no final result event");
   });
 
@@ -522,7 +522,7 @@ describe("createClaudeHeadlessBackend", () => {
         stdoutTailStartsAtLineBoundary: true,
       },
     });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" }))
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true }))
       .resolves.toBe(REPORT);
   });
 
@@ -544,21 +544,22 @@ describe("createClaudeHeadlessBackend", () => {
     const { deps } = harness({ runResult });
     await expect(createClaudeHeadlessBackend(deps)("P", {
       sessionName: "bom-cap-repro",
+      direct: true,
     })).rejects.toThrow("exceeded the 16 MiB limit");
   });
 
   test("an empty result string is a typed error", async () => {
     const { deps } = harness({ stdout: claudeEnvelope("   ") });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow("empty result");
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("empty result");
   });
 
   test("a setup failure before exec rejects and never runs claude", async () => {
     const w = harness({ writeThrows: true });
-    await expect(createClaudeHeadlessBackend(w.deps)("P", { sessionName: "s" })).rejects.toThrow("write failed");
+    await expect(createClaudeHeadlessBackend(w.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("write failed");
     expect(w.runs).toHaveLength(0);
 
     const m = harness({ mkdirThrows: true });
-    await expect(createClaudeHeadlessBackend(m.deps)("P", { sessionName: "s" })).rejects.toThrow("mkdir failed");
+    await expect(createClaudeHeadlessBackend(m.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("mkdir failed");
     expect(m.runs).toHaveLength(0);
   });
 });
@@ -566,7 +567,7 @@ describe("createClaudeHeadlessBackend", () => {
 describe("createCodexHeadlessBackend", () => {
   test("writes the brief, runs codex exec read-only, reads the -o verdict, cleans up", async () => {
     const { deps, runs, writes, reads, rms } = harness({ isolateCodexHome: true });
-    const out = await createCodexHeadlessBackend(deps)("PROMPT BODY", { sessionName: "wuxr-s1-codex", cwd: "/repo" });
+    const out = await createCodexHeadlessBackend(deps)("PROMPT BODY", { sessionName: "wuxr-s1-codex", cwd: "/repo", direct: true });
 
     expect(out).toBe(REPORT);
     expect(runs).toHaveLength(1);
@@ -589,35 +590,35 @@ describe("createCodexHeadlessBackend", () => {
 
   test("clears any stale -o file before running, so an old verdict can't be read back", async () => {
     const { deps, rms } = harness();
-    await createCodexHeadlessBackend(deps)("P", { sessionName: "s" });
+    await createCodexHeadlessBackend(deps)("P", { sessionName: "s", direct: true });
     // rm is called for the -o path both before the run (stale clear) and in cleanup.
     expect(rms.filter((p) => p === "/tmp/test/s-last.txt").length).toBeGreaterThanOrEqual(2);
   });
 
   test("forwards the model flag as -m when set", async () => {
     const { deps, runs } = harness();
-    await createCodexHeadlessBackend(deps)("P", { sessionName: "s", model: "gpt-5.4" });
+    await createCodexHeadlessBackend(deps)("P", { sessionName: "s", model: "gpt-5.4", direct: true });
     expect(runs[0]!.cmd).toContain("-m");
     expect(runs[0]!.cmd[runs[0]!.cmd.indexOf("-m") + 1]).toBe("gpt-5.4");
   });
 
   test("always uses a private per-leg cwd instead of the reviewed repository", async () => {
     const { deps, runs } = harness();
-    await createCodexHeadlessBackend(deps)("P", { sessionName: "s", cwd: "/malicious/repo" });
+    await createCodexHeadlessBackend(deps)("P", { sessionName: "s", cwd: "/malicious/repo", direct: true });
     expect(runs[0]!.cmd).toContain(REVIEWER_CWD);
     expect(runs[0]!.opts.cwd).toBe(REVIEWER_CWD);
   });
 
   test("a timed-out leg is a clean bounded error and still cleans up", async () => {
     const { deps, rms } = harness({ runResult: { timedOut: true, code: null } });
-    await expect(createCodexHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow("timed out after 1s");
+    await expect(createCodexHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("timed out after 1s");
     expect(rms).toContain("/tmp/test/s-prompt.md");
     expect(rms).toContain("/tmp/test/s-last.txt");
   });
 
   test("a non-zero exit surfaces the stderr detail and still cleans up both temp files", async () => {
     const { deps, rms } = harness({ runResult: { code: 1, stderr: "codex: not logged in" } });
-    await expect(createCodexHeadlessBackend(deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "codex exec failed: codex: not logged in",
     );
     expect(rms).toContain("/tmp/test/s-prompt.md");
@@ -626,14 +627,14 @@ describe("createCodexHeadlessBackend", () => {
 
   test("an absent or empty final message is a typed error and cleans up, never a silent approval", async () => {
     const absent = harness({ lastMessageMissing: true });
-    await expect(createCodexHeadlessBackend(absent.deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(absent.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "produced no final message",
     );
     expect(absent.rms).toContain("/tmp/test/s-prompt.md");
     expect(absent.rms).toContain("/tmp/test/s-last.txt");
 
     const empty = harness({ lastMessage: "   \n" });
-    await expect(createCodexHeadlessBackend(empty.deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(empty.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "produced no final message",
     );
     expect(empty.rms).toContain("/tmp/test/s-prompt.md");
@@ -642,7 +643,7 @@ describe("createCodexHeadlessBackend", () => {
 
   test("a setup failure before exec rejects, never runs codex, and still cleans up", async () => {
     const w = harness({ writeThrows: true });
-    await expect(createCodexHeadlessBackend(w.deps)("P", { sessionName: "s" })).rejects.toThrow("write failed");
+    await expect(createCodexHeadlessBackend(w.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("write failed");
     expect(w.runs).toHaveLength(0);
     // The finally still removes both temp paths (rm is force:true, so a never-written file is a no-op).
     expect(w.rms).toContain("/tmp/test/s-prompt.md");
@@ -654,14 +655,14 @@ describe("temp path safety (both headless legs)", () => {
   test("a session name that could escape the temp dir is a fail-closed error, before any I/O", async () => {
     for (const name of ["../evil", "a/b", "..", "with space"]) {
       const claude = harness();
-      await expect(createClaudeHeadlessBackend(claude.deps)("P", { sessionName: name })).rejects.toThrow(
+      await expect(createClaudeHeadlessBackend(claude.deps)("P", { sessionName: name, direct: true })).rejects.toThrow(
         "invalid reviewer session name",
       );
       expect(claude.runs).toHaveLength(0);
       expect(claude.writes).toHaveLength(0);
 
       const codex = harness();
-      await expect(createCodexHeadlessBackend(codex.deps)("P", { sessionName: name })).rejects.toThrow(
+      await expect(createCodexHeadlessBackend(codex.deps)("P", { sessionName: name, direct: true })).rejects.toThrow(
         "invalid reviewer session name",
       );
       expect(codex.runs).toHaveLength(0);
@@ -678,11 +679,11 @@ describe("reviewer containment", () => {
       const backend = reviewer === "claude"
         ? createClaudeHeadlessBackend
         : createCodexHeadlessBackend;
-      await backend(direct.deps)("PROMPT", { sessionName: `parity-${reviewer}`, cwd: "/repo" });
+      await backend(direct.deps)("PROMPT", { sessionName: `parity-${reviewer}`, cwd: "/repo", direct: true });
       await backend(observable.deps)("PROMPT", {
         sessionName: `parity-${reviewer}`,
         cwd: "/repo",
-        inspect: true,
+        direct: false,
       });
       const directRun = direct.runs.find(({ cmd }) => cmd[0] === reviewer)!;
       const argsWrite = observable.writes.find(({ path }) => path.endsWith("-observable-args"))!;
@@ -752,10 +753,12 @@ describe("reviewer containment", () => {
       await expect(createClaudeHeadlessBackend(makeDeps())(prompt, {
         sessionName: "adversarial-claude",
         cwd: repo,
+        direct: true,
       })).resolves.toBe(REPORT);
       await expect(createCodexHeadlessBackend(makeDeps())(prompt, {
         sessionName: "adversarial-codex",
         cwd: repo,
+        direct: true,
       })).resolves.toBe(REPORT);
 
       expect(await Bun.file(join(repo, "owned.txt")).text()).toBe("UNCHANGED\n");
@@ -768,10 +771,10 @@ describe("reviewer containment", () => {
   });
 });
 
-describe("--inspect (strict observable Wux adapter)", () => {
-  test("claude leg runs in a fresh Wux shell and returns only the atomic result", async () => {
+describe("observable Wux adapter", () => {
+  test("omitting the low-level transport option runs the Claude leg in a fresh Wux shell", async () => {
     const { deps, runs, writes, rms, files } = harness();
-    const out = await createClaudeHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-claude", inspect: true, cwd: "/repo" });
+    const out = await createClaudeHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-claude", cwd: "/repo" });
     expect(out).toBe(REPORT);
 
     const launch = runs.find((r) => r.cmd[0] === "wux" && r.cmd.includes("run") && r.cmd.includes("shell"));
@@ -817,7 +820,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
 
   test("codex leg preserves its exact argv and reads the -o output through result.json", async () => {
     const { deps, runs, files } = harness();
-    const out = await createCodexHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-codex", inspect: true, cwd: "/repo" });
+    const out = await createCodexHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-codex", direct: false, cwd: "/repo" });
     expect(out).toBe(REPORT);
     const launch = runs.find((r) => r.cmd.includes("run") && r.cmd.includes("shell"));
     expect(launch).toBeDefined();
@@ -832,7 +835,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
     await expect(
       createCodexHeadlessBackend(deps)("PROMPT", {
         sessionName: "wuxr-s-codex",
-        inspect: true,
+        direct: false,
         cwd: "/repo",
       }),
     ).rejects.toThrow("codex exec produced no final message");
@@ -842,31 +845,31 @@ describe("--inspect (strict observable Wux adapter)", () => {
 
   test("a non-zero in-session exit surfaces as a leg failure (exit-code parity with the direct path)", async () => {
     const { deps } = harness({ inspectExitCode: "1", inspectCapture: "claude: auth required" });
-    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", inspect: true })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: false })).rejects.toThrow(
       "claude -p failed: exit 1",
     );
   });
 
-  test("an inspect timeout preserves its typed timed_out lifecycle state", async () => {
+  test("an observable timeout preserves its typed timed_out lifecycle state", async () => {
     const { deps } = harness({
       inspectExitCode: "__WUX_REVIEW_TIMEOUT__",
       lastMessageMissing: true,
     });
     const error = await createCodexHeadlessBackend(deps)("P", {
       sessionName: "s",
-      inspect: true,
+      direct: false,
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error & { state?: string }).state).toBe("timed_out");
   });
 
-  test("a Claude inspect timeout preserves its typed timed_out lifecycle state", async () => {
+  test("a Claude observable timeout preserves its typed timed_out lifecycle state", async () => {
     const { deps } = harness({
       inspectExitCode: "__WUX_REVIEW_TIMEOUT__",
     });
     const error = await createClaudeHeadlessBackend(deps)("P", {
       sessionName: "s",
-      inspect: true,
+      direct: false,
     }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error & { state?: string }).state).toBe("timed_out");
@@ -880,7 +883,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
-      inspect: true,
+      direct: false,
       signal: abort.signal,
       recordEvidence: () => abort.abort("parent-interrupted"),
     })).rejects.toMatchObject({ state: "interrupted" });
@@ -896,7 +899,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
     const h = harness();
     await expect(createClaudeHeadlessBackend(h.deps)("P", {
       sessionName: "s",
-      inspect: true,
+      direct: false,
       signal: abort.signal,
       recordEvidence: () => abort.abort("parent-interrupted"),
     })).rejects.toMatchObject({ state: "interrupted" });
@@ -913,7 +916,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
-      inspect: true,
+      direct: false,
       signal: abort.signal,
       recordEvidence: () => undefined,
     })).resolves.toBe(REPORT);
@@ -926,14 +929,14 @@ describe("--inspect (strict observable Wux adapter)", () => {
     // The captured stdout is a clean envelope; the captured stderr is noise. Under
     // the old `2>&1` merge this would corrupt the JSON; kept separate, it parses.
     const { deps } = harness({ inspectCapture: claudeEnvelope(REPORT), inspectCaptureErr: "Warning: telemetry notice\n" });
-    const out = await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", inspect: true });
+    const out = await createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: false });
     expect(out).toBe(REPORT);
   });
 
   test("fails closed when wux exits non-zero (candidate mode never falls back)", async () => {
     const { deps, runs } = harness({ wuxLaunchCode: 1 });
     await expect(
-      createClaudeHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-claude", inspect: true }),
+      createClaudeHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-claude", direct: false }),
     ).rejects.toThrow("wuxr-s-claude observable reviewer leg");
     expect(runs.some((r) => r.cmd.join(" ").startsWith("wux --local run shell"))).toBe(true);
     expect(runs.find((r) => r.cmd[0] === "claude")).toBeUndefined();
@@ -942,7 +945,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   test("fails closed when wux is absent (launch rejects)", async () => {
     const { deps, runs } = harness({ wuxLaunchThrows: true });
     await expect(
-      createClaudeHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-claude", inspect: true }),
+      createClaudeHeadlessBackend(deps)("PROMPT", { sessionName: "wuxr-s-claude", direct: false }),
     ).rejects.toThrow("wux run shell failed");
     expect(runs.some((r) => r.cmd.join(" ").startsWith("wux --local run shell"))).toBe(true);
     expect(runs.find((r) => r.cmd[0] === "claude")).toBeUndefined();
@@ -950,20 +953,20 @@ describe("--inspect (strict observable Wux adapter)", () => {
 
   test("explicit direct mode never touches wux", async () => {
     const c = harness();
-    await createClaudeHeadlessBackend(c.deps)("P", { sessionName: "s", inspect: false });
+    await createClaudeHeadlessBackend(c.deps)("P", { sessionName: "s", direct: true });
     expect(c.runs.every((r) => r.cmd[0] !== "wux")).toBe(true);
 
     const x = harness();
-    await createCodexHeadlessBackend(x.deps)("P", { sessionName: "s", inspect: false });
+    await createCodexHeadlessBackend(x.deps)("P", { sessionName: "s", direct: true });
     expect(x.runs.every((r) => r.cmd[0] !== "wux")).toBe(true);
   });
 
-  // The wrapper is the one piece of real bash the inspect path relies on (the
+  // The wrapper is the one piece of real bash the observable path relies on (the
   // mocked-run tests above never execute it). Run the actual generated script and
   // assert it recovers EVERY argv element — including spaces and the trailing arg,
   // which a naive `read -d ""` loop silently drops.
   test("the generated wrapper recovers every argv element (spaces + last arg) and writes the done marker", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-"));
     try {
       const argsPath = join(dir, "args");
       const capPath = join(dir, "cap");
@@ -1013,7 +1016,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper snapshots Codex output before cleaning interruption-owned files and home", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-recovery-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-recovery-"));
     try {
       const argsPath = join(dir, "args");
       const readyPath = join(dir, "ready");
@@ -1053,7 +1056,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("a normally-exiting observable attempt leaves shared retry inputs for its live parent", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-retry-cleanup-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-retry-cleanup-"));
     try {
       const argsPath = join(dir, "args");
       const readyPath = join(dir, "ready");
@@ -1091,7 +1094,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper keeps its mechanics independent of the reviewer's restricted PATH", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-path-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-path-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1129,7 +1132,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper terminates an over-budget model before publishing its timeout marker", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-timeout-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-timeout-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1176,7 +1179,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper publishes exit 125 when the parent never marks it ready", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-ready-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-ready-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1201,7 +1204,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper does not recreate a release ack after the parent cleaned up", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-release-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-release-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1264,7 +1267,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper exits its release wait when the parent is gone", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-parent-gone-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-parent-gone-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1298,7 +1301,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper rechecks release after its pane flush delay", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-release-flush-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-release-flush-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1340,7 +1343,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper stamps and self-cleans the run-token acknowledgement", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-release-token-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-release-token-"));
     try {
       const argsPath = join(dir, "args");
       const donePath = join(dir, "done");
@@ -1376,7 +1379,7 @@ describe("--inspect (strict observable Wux adapter)", () => {
   });
 
   test("the generated wrapper leaves no watchdog sleep after an early successful exit", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "wuxr-inspect-watchdog-"));
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-watchdog-"));
     try {
       const argsPath = join(dir, "args");
       const readyPath = join(dir, "ready");
@@ -1552,7 +1555,7 @@ describe("codex leg: size-aware timeout", () => {
   test("a large prompt scales the timeout, and a genuine overrun is a typed timeout at the scaled bound", async () => {
     // base 60s + 10 KB · 1000 ms/KB = 70s.
     const { deps } = harness({ timeoutMs: 60_000, timeoutPerKbMs: 1000, runResult: { timedOut: true, code: null } });
-    await expect(createCodexHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "codex reviewer timed out after 70s",
     );
   });
@@ -1566,7 +1569,7 @@ describe("codex leg: size-aware timeout", () => {
       claudeTimeoutPerKbMs: 5,
       runResult: { timedOut: true, code: null },
     });
-    await expect(createCodexHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "codex reviewer timed out after 70s",
     );
   });
@@ -1583,7 +1586,7 @@ describe("claude leg: size-aware timeout (#99)", () => {
       captured = o.timeoutMs;
       return { code: null, stdout: "", stderr: "", timedOut: true };
     };
-    await expect(createClaudeHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "claude reviewer timed out after 70s",
     );
     expect(captured).toBe(70_000);
@@ -1591,7 +1594,7 @@ describe("claude leg: size-aware timeout (#99)", () => {
 
   test("the timeout message names the prompt size and the env var that raises the ceiling", async () => {
     const { deps } = harness({ timeoutMs: 60_000, claudeTimeoutPerKbMs: 1000, runResult: { timedOut: true, code: null } });
-    await expect(createClaudeHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "claude reviewer timed out after 70s (prompt 10 KB; raise WUX_REVIEW_CLAUDE_TIMEOUT_MS)",
     );
   });
@@ -1603,14 +1606,14 @@ describe("claude leg: size-aware timeout (#99)", () => {
       codexTimeoutPerKbMs: 5,
       runResult: { timedOut: true, code: null },
     });
-    await expect(createClaudeHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "claude reviewer timed out after 70s",
     );
   });
 
   test("the codex leg's timeout message is likewise actionable (symmetric)", async () => {
     const { deps } = harness({ timeoutMs: 60_000, codexTimeoutPerKbMs: 1000, runResult: { timedOut: true, code: null } });
-    await expect(createCodexHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "codex reviewer timed out after 70s (prompt 10 KB; raise WUX_REVIEW_CODEX_TIMEOUT_MS)",
     );
   });
@@ -1624,7 +1627,7 @@ describe("claude leg: size-aware timeout (#99)", () => {
       claudeMaxTimeoutMs: 65_000,
       runResult: { timedOut: true, code: null },
     });
-    await expect(createClaudeHeadlessBackend(claude.deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createClaudeHeadlessBackend(claude.deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "claude reviewer timed out after 65s (prompt 10 KB; raise WUX_REVIEW_CLAUDE_MAX_TIMEOUT_MS)",
     );
 
@@ -1634,7 +1637,7 @@ describe("claude leg: size-aware timeout (#99)", () => {
       codexMaxTimeoutMs: 65_000,
       runResult: { timedOut: true, code: null },
     });
-    await expect(createCodexHeadlessBackend(codex.deps)("x".repeat(10 * 1024), { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(codex.deps)("x".repeat(10 * 1024), { sessionName: "s", direct: true })).rejects.toThrow(
       "codex reviewer timed out after 65s (prompt 10 KB; raise WUX_REVIEW_CODEX_MAX_TIMEOUT_MS)",
     );
   });
@@ -1701,9 +1704,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("bare defaults give an 11 KB Claude prompt at least 15 minutes without inflating codex", async () => {
     await withEnv({}, async () => {
       const claude = captureBackend("claude");
-      await claude.backend("x".repeat(11 * 1024), { sessionName: "s" });
+      await claude.backend("x".repeat(11 * 1024), { sessionName: "s", direct: true });
       const codex = captureBackend("codex");
-      await codex.backend("x".repeat(11 * 1024), { sessionName: "s" });
+      await codex.backend("x".repeat(11 * 1024), { sessionName: "s", direct: true });
 
       expect(claude.box.timeoutMs).toBe(911_000);
       expect(codex.box.timeoutMs).toBe(242_750);
@@ -1713,7 +1716,7 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("the built-in Claude hard cap is 25 minutes", async () => {
     await withEnv({}, async () => {
       const { backend, box } = captureBackend("claude");
-      await backend("x".repeat(1024 * 1024), { sessionName: "s" });
+      await backend("x".repeat(1024 * 1024), { sessionName: "s", direct: true });
       expect(box.timeoutMs).toBe(25 * 60 * 1000);
     });
   });
@@ -1727,9 +1730,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
       },
       async () => {
         const claude = captureBackend("claude");
-        await claude.backend("", { sessionName: "s" });
+        await claude.backend("", { sessionName: "s", direct: true });
         const codex = captureBackend("codex");
-        await codex.backend("", { sessionName: "s" });
+        await codex.backend("", { sessionName: "s", direct: true });
         expect(claude.box.timeoutMs).toBe(200_000);
         expect(codex.box.timeoutMs).toBe(300_000);
       },
@@ -1739,9 +1742,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("the existing shared base override remains backward compatible for both legs", async () => {
     await withEnv({ WUX_REVIEW_TIMEOUT_MS: "500000" }, async () => {
       const claude = captureBackend("claude");
-      await claude.backend("", { sessionName: "s" });
+      await claude.backend("", { sessionName: "s", direct: true });
       const codex = captureBackend("codex");
-      await codex.backend("", { sessionName: "s" });
+      await codex.backend("", { sessionName: "s", direct: true });
       expect(claude.box.timeoutMs).toBe(500_000);
       expect(codex.box.timeoutMs).toBe(500_000);
     });
@@ -1750,7 +1753,7 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("the legacy injected timeoutMs seam still controls Claude when its new field is omitted", async () => {
     await withEnv({}, async () => {
       const { backend, box } = captureBackend("claude", { timeoutMs: 123_000 });
-      await backend("", { sessionName: "s" });
+      await backend("", { sessionName: "s", direct: true });
       expect(box.timeoutMs).toBe(123_000);
     });
   });
@@ -1758,9 +1761,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("startup output names each leg, prompt size, and effective timeout budget", async () => {
     await withEnv({}, async () => {
       const claude = captureBackend("claude");
-      await claude.backend("x".repeat(11 * 1024), { sessionName: "s" });
+      await claude.backend("x".repeat(11 * 1024), { sessionName: "s", direct: true });
       const codex = captureBackend("codex");
-      await codex.backend("x".repeat(11 * 1024), { sessionName: "s" });
+      await codex.backend("x".repeat(11 * 1024), { sessionName: "s", direct: true });
 
       expect(claude.warns).toContain(
         "wux-review: claude reviewer starting (prompt 11 KB; timeout budget 911s)",
@@ -1774,7 +1777,7 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("existing WUX_REVIEW_CODEX_* overrides still drive the codex leg (AC4)", async () => {
     await withEnv({ WUX_REVIEW_TIMEOUT_MS: "100000", WUX_REVIEW_CODEX_TIMEOUT_PER_KB_MS: "500" }, async () => {
       const { backend, box } = captureBackend("codex");
-      await backend("x".repeat(10 * 1024), { sessionName: "s" });
+      await backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
       // base 100000 + 10 KB · 500 = 105000.
       expect(box.timeoutMs).toBe(105_000);
     });
@@ -1783,7 +1786,7 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("the CLAUDE per-leg var drives the claude leg", async () => {
     await withEnv({ WUX_REVIEW_TIMEOUT_MS: "100000", WUX_REVIEW_CLAUDE_TIMEOUT_PER_KB_MS: "2000" }, async () => {
       const { backend, box } = captureBackend("claude");
-      await backend("x".repeat(10 * 1024), { sessionName: "s" });
+      await backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
       // base 100000 + 10 KB · 2000 = 120000.
       expect(box.timeoutMs).toBe(120_000);
     });
@@ -1792,9 +1795,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
   test("the leg-agnostic var raises BOTH legs when no leg-specific var is set", async () => {
     await withEnv({ WUX_REVIEW_TIMEOUT_MS: "100000", WUX_REVIEW_TIMEOUT_PER_KB_MS: "300" }, async () => {
       const claude = captureBackend("claude");
-      await claude.backend("x".repeat(10 * 1024), { sessionName: "s" });
+      await claude.backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
       const codex = captureBackend("codex");
-      await codex.backend("x".repeat(10 * 1024), { sessionName: "s" });
+      await codex.backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
       // Both: base 100000 + 10 KB · 300 = 103000.
       expect(claude.box.timeoutMs).toBe(103_000);
       expect(codex.box.timeoutMs).toBe(103_000);
@@ -1806,9 +1809,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
       { WUX_REVIEW_TIMEOUT_MS: "100000", WUX_REVIEW_TIMEOUT_PER_KB_MS: "300", WUX_REVIEW_CLAUDE_TIMEOUT_PER_KB_MS: "2000" },
       async () => {
         const claude = captureBackend("claude");
-        await claude.backend("x".repeat(10 * 1024), { sessionName: "s" });
+        await claude.backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
         const codex = captureBackend("codex");
-        await codex.backend("x".repeat(10 * 1024), { sessionName: "s" });
+        await codex.backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
         // claude uses its own 2000 (120000); codex falls back to the agnostic 300 (103000).
         expect(claude.box.timeoutMs).toBe(120_000);
         expect(codex.box.timeoutMs).toBe(103_000);
@@ -1829,9 +1832,9 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
       },
       async () => {
         const claude = captureBackend("claude");
-        await claude.backend("x".repeat(10 * 1024), { sessionName: "s" });
+        await claude.backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
         const codex = captureBackend("codex");
-        await codex.backend("x".repeat(10 * 1024), { sessionName: "s" });
+        await codex.backend("x".repeat(10 * 1024), { sessionName: "s", direct: true });
         // claude clamps to its own 150000; codex clamps to the agnostic 130000.
         expect(claude.box.timeoutMs).toBe(150_000);
         expect(codex.box.timeoutMs).toBe(130_000);
@@ -1843,7 +1846,7 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
 describe("codex leg: per-leg CODEX_HOME isolation", () => {
   test("isolates by default: each leg runs with its own CODEX_HOME and tears it down", async () => {
     const h = harness({ isolateCodexHome: true });
-    const out = await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" });
+    const out = await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true });
     expect(out).toBe(REPORT);
     expect(h.counts.prepare).toBe(1);
     expect(h.counts.cleanup).toBe(1);
@@ -1856,7 +1859,7 @@ describe("codex leg: per-leg CODEX_HOME isolation", () => {
 
   test("tears the home down even when the leg fails", async () => {
     const h = harness({ isolateCodexHome: true, runResult: { code: 1, stderr: "boom" } });
-    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" })).rejects.toThrow("codex exec failed");
+    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("codex exec failed");
     expect(h.counts.cleanup).toBe(1);
   });
 
@@ -1865,7 +1868,7 @@ describe("codex leg: per-leg CODEX_HOME isolation", () => {
       isolateCodexHome: true,
       homeDiagnostics: ["codex reviewer: generated a minimal config (parse detail)"],
     });
-    await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" });
+    await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true });
     expect(h.warns).toContain(
       "codex reviewer: generated a minimal config (parse detail)",
     );
@@ -1873,7 +1876,7 @@ describe("codex leg: per-leg CODEX_HOME isolation", () => {
 
   test("fails closed instead of loading the shared home when isolation is unavailable", async () => {
     const h = harness({ isolateCodexHome: true, prepareError: "permission denied" });
-    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" }))
+    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true }))
       .rejects.toThrow("permission denied");
     expect(h.counts.prepare).toBe(1);
     expect(h.counts.cleanup).toBe(0);
@@ -1882,7 +1885,7 @@ describe("codex leg: per-leg CODEX_HOME isolation", () => {
 
   test("the injected no-isolation test seam ignores shared user config", async () => {
     const h = harness({ isolateCodexHome: false });
-    await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" });
+    await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true });
     expect(h.counts.prepare).toBe(0);
     const codexRun = h.runs.find((r) => r.cmd[0] === "codex");
     expect(codexRun!.opts.env).toBeUndefined();
@@ -1893,7 +1896,7 @@ describe("codex leg: per-leg CODEX_HOME isolation", () => {
 describe("codex leg: bounded retry with backoff", () => {
   test("recovers a transient exit-1: retries and returns the verdict, surfacing the recovery", async () => {
     const h = harness({ codexRetries: 2, codexRetryBaseMs: 1, runResults: [{ code: 1, stderr: "transient flake" }, { code: 0 }] });
-    const out = await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" });
+    const out = await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true });
     expect(out).toBe(REPORT);
     expect(h.runs.filter((r) => r.cmd[0] === "codex")).toHaveLength(2);
     expect(h.sleeps).toEqual([1]); // one backoff between the two attempts
@@ -1904,7 +1907,7 @@ describe("codex leg: bounded retry with backoff", () => {
 
   test("a persistent exit-1 fails after all attempts, with the count and detail in a typed error", async () => {
     const h = harness({ codexRetries: 2, codexRetryBaseMs: 1, runResult: { code: 1, stderr: "codex: boom" } });
-    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "codex exec failed after 3 attempts: codex: boom",
     );
     expect(h.runs.filter((r) => r.cmd[0] === "codex")).toHaveLength(3);
@@ -1913,7 +1916,7 @@ describe("codex leg: bounded retry with backoff", () => {
 
   test("an empty verdict is retried too, and exhaustion is a typed error", async () => {
     const h = harness({ codexRetries: 1, codexRetryBaseMs: 1, lastMessage: "   \n" });
-    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" })).rejects.toThrow(
+    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "produced no final message after 2 attempts",
     );
     expect(h.runs.filter((r) => r.cmd[0] === "codex")).toHaveLength(2);
@@ -1921,14 +1924,14 @@ describe("codex leg: bounded retry with backoff", () => {
 
   test("a timeout is NEVER retried (retrying only doubles the wait) — it surfaces immediately", async () => {
     const h = harness({ codexRetries: 3, runResult: { timedOut: true, code: null } });
-    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s" })).rejects.toThrow("timed out after 1s");
+    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("timed out after 1s");
     expect(h.runs.filter((r) => r.cmd[0] === "codex")).toHaveLength(1);
     expect(h.sleeps).toEqual([]);
   });
 
-  test("--inspect preserves per-leg isolation (candidate transport does not weaken auth isolation)", async () => {
+  test("observable execution preserves per-leg isolation", async () => {
     const h = harness({ isolateCodexHome: true, codexRetries: 3 });
-    const out = await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", inspect: true });
+    const out = await createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: false });
     expect(out).toBe(REPORT);
     expect(h.counts.prepare).toBe(1);
     expect(h.counts.cleanup).toBe(1);
@@ -1936,7 +1939,7 @@ describe("codex leg: bounded retry with backoff", () => {
     expect(launch?.opts.env).toEqual({ CODEX_HOME: "/tmp/iso-home" });
   });
 
-  test("--inspect checkpoints an exact retry child before Wux can launch it", async () => {
+  test("observable execution checkpoints an exact retry child before Wux can launch it", async () => {
     const h = harness({
       codexRetries: 1,
       codexRetryBaseMs: 1,
@@ -1945,7 +1948,7 @@ describe("codex leg: bounded retry with backoff", () => {
     const prepared: { childName: string; attempt: number }[] = [];
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
-      inspect: true,
+      direct: false,
       recordPreparedChild: async (childName, attempt) => {
         prepared.push({ childName, attempt });
         if (attempt === 2) {

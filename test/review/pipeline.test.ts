@@ -135,7 +135,7 @@ describe("runReview", () => {
     };
     let recovery: ObservableRoundRecord | undefined;
     await expect(runReview(
-      { session: "srace", inspect: true },
+      { session: "srace", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({
@@ -204,7 +204,7 @@ describe("runReview", () => {
       async clear() {},
     };
     await expect(runReview(
-      { session: "directreadfail" },
+      { session: "directreadfail", direct: true },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -236,7 +236,7 @@ describe("runReview", () => {
       async clear() {},
     };
     await expect(runReview(
-      { session: "directcorrupt" },
+      { session: "directcorrupt", direct: true },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -269,7 +269,7 @@ describe("runReview", () => {
       async clear() {},
     };
     await expect(runReview(
-      { session: "directnewer" },
+      { session: "directnewer", direct: true },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -311,7 +311,7 @@ describe("runReview", () => {
       async clear() {},
     };
     await expect(runReview(
-      { session: "observableunreliable", inspect: true },
+      { session: "observableunreliable", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -341,7 +341,7 @@ describe("runReview", () => {
       async prune() {},
     };
     await expect(runReview(
-      { session: "observablefinalread", inspect: true },
+      { session: "observablefinalread", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -446,8 +446,8 @@ describe("runReview", () => {
       },
     };
 
-    await runReview({ session: "sobs", inspect: true }, d);
-    await runReview({ session: "sobs", inspect: true }, d);
+    await runReview({ session: "sobs", direct: false }, d);
+    await runReview({ session: "sobs", direct: false }, d);
     const children = data.get("sobs")?.children;
     expect(children).toHaveLength(2);
     expect(children?.map((entry) => entry.round)).toEqual([1, 2]);
@@ -537,7 +537,7 @@ describe("runReview", () => {
     };
 
     await expect(runReview(
-      { session: "pipelineobs", inspect: true },
+      { session: "pipelineobs", direct: false },
       d,
     )).resolves.toMatchObject({ verdict: "approve" });
     expect(prunes).toBe(1);
@@ -558,7 +558,7 @@ describe("runReview", () => {
     let current: ObservableRoundRecord | undefined;
     const baseChild = "wuxr-prepretry-r1-xexec1-codex";
     await expect(runReview(
-      { session: "prepretry", inspect: true },
+      { session: "prepretry", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -613,7 +613,7 @@ describe("runReview", () => {
       verdict: "approve" as const,
     });
     await expect(runReview(
-      { session: "pipelineinterrupt", inspect: true, signal: signal.signal },
+      { session: "pipelineinterrupt", direct: false, signal: signal.signal },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({
@@ -702,7 +702,7 @@ describe("runReview", () => {
       async prune() {},
     };
     await expect(runReview(
-      { session: "pipelinepersistinterrupt", inspect: true, signal: signal.signal },
+      { session: "pipelinepersistinterrupt", direct: false, signal: signal.signal },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({
@@ -805,7 +805,7 @@ describe("runReview", () => {
       };
     };
     await expect(runReview(
-      { session: "pipelinecommit", inspect: true },
+      { session: "pipelinecommit", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -834,7 +834,7 @@ describe("runReview", () => {
     completedSaveFailures = 1;
     const committed = memStore();
     await expect(runReview(
-      { session: "pipelinecommit", inspect: true },
+      { session: "pipelinecommit", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -894,7 +894,7 @@ describe("runReview", () => {
       async prune() {},
     };
     const launch = () => runReview(
-      { session: "pipelinebusy", inspect: true },
+      { session: "pipelinebusy", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -942,7 +942,7 @@ describe("runReview", () => {
       async prune() {},
     };
     const launch = () => runReview(
-      { session: "pipelinecleanup", inspect: true },
+      { session: "pipelinecleanup", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -987,7 +987,7 @@ describe("runReview", () => {
       async prune() {},
     };
     await expect(runReview(
-      { session: "pipelineinterruptcleanup", inspect: true },
+      { session: "pipelineinterruptcleanup", direct: false },
       {
         loadConfig: async () => ({}),
         getDiff: async () => ({ diff: "diff --git a/x b/x\n+x\n", files: ["x"] }),
@@ -1018,7 +1018,7 @@ describe("runReview", () => {
     let locks = 0;
     let reviewerCalls = 0;
     await expect(runReview(
-      { session: "pipelineabort", inspect: true, signal: abort.signal },
+      { session: "pipelineabort", direct: false, signal: abort.signal },
       {
         loadConfig: async () => ({}),
         getDiff: async () => {
@@ -1043,7 +1043,7 @@ describe("runReview", () => {
     const claude = scripted([[]]);
     const codex = scripted([[]]);
     const { store, data } = memStore();
-    await runReview({ session: "sdirect" }, deps(claude.backend, codex.backend, store));
+    await runReview({ session: "sdirect", direct: true }, deps(claude.backend, codex.backend, store));
     expect(data.get("sdirect")?.children).toBeUndefined();
   });
 

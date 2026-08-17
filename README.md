@@ -58,7 +58,8 @@ headless legs. The consolidated verdict is **block** if either leg raises a
 must-fix; otherwise it is **approve**. Nits never block. The worker owns the
 fix and re-review loop; the tool does not merge or change code.
 
-Observable Wux execution is the default. Each unchanged headless leg runs in a
+Observable Wux execution is structural: the shared pipeline selects it whenever
+no transport is explicitly requested. Each unchanged headless leg runs in a
 fresh `wux run shell` child and must publish an identity-validated atomic result
 from its durable run directory. Missing or invalid evidence fails closed.
 `--direct` runs the same contained reviewer argv without Wux as an explicit

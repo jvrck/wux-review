@@ -25,10 +25,9 @@ export interface BackendOptions {
   // it running for the next re-review. The default headless legs are one-shot
   // and ignore this — each round is a fresh, bounded review of the current diff.
   persist?: boolean;
-  // Strict observable transport: run the unchanged headless leg inside a fresh
-  // `wux run shell` session. Wux/result validation failures fail closed and
-  // never fall back. User-facing callers select this by default.
-  inspect?: boolean;
+  // Direct transport is the explicit emergency rollback. Omission selects the
+  // strict observable Wux transport and its fail-closed result validation.
+  direct?: boolean;
   // Observable identity. The explicit direct-headless path ignores these
   // fields; the adapter records each successful Wux launch through the
   // callback, including separate Codex retry attempts.
@@ -57,9 +56,9 @@ export interface RunReviewersOptions {
   // Session mode (`--session`): forwarded to the interactive backend; the
   // default headless legs ignore it (one-shot, no live session to retain).
   persist?: boolean;
-  // Strict observable transport selected by the user-facing caller by default.
-  // False is the explicit direct-headless rollback path.
-  inspect?: boolean;
+  // Direct transport is the explicit direct-headless rollback. Omission is the
+  // strict observable Wux transport for every caller, including low-level ones.
+  direct?: boolean;
   // 1-based review round, used by the observable child name and durable result
   // identity. Defaults to 1 for direct runReviewers callers.
   round?: number;
@@ -131,36 +130,39 @@ export async function runReviewers(
   if (!Number.isSafeInteger(round) || round < 1) {
     throw new WuxReviewError(`invalid review round: ${round}`);
   }
-  const observablePrefix = options.inspect === true
+  const observable = options.direct !== true;
+  const observablePrefix = observable
     ? validateObservablePrefix(options.observablePrefix ?? process.env.WUX_REVIEW_OBSERVABLE_PREFIX ?? "wuxr")
     : "wuxr";
-  const observableExecutionId = options.inspect === true
+  const observableExecutionId = observable
     ? validateObservableExecutionId(options.observableExecutionId ?? randomUUID().replaceAll("-", "").slice(0, 8))
     : "";
   const evidence = {
     claude: [] as LegExecutionEvidence[],
     codex: [] as LegExecutionEvidence[],
   };
-  const claudeSessionName = options.inspect === true
+  const claudeSessionName = observable
     ? observableSessionName(observablePrefix, sessionId, round, "claude", observableExecutionId)
     : sessionName(sessionId, "claude");
-  const codexSessionName = options.inspect === true
+  const codexSessionName = observable
     ? observableSessionName(observablePrefix, sessionId, round, "codex", observableExecutionId)
     : sessionName(sessionId, "codex");
 
-  if (options.inspect !== true) {
+  if (!observable) {
     const [claude, codex] = await Promise.all([
       invoke("claude", backends.claude, claudePrompt, {
         sessionName: claudeSessionName,
         model: options.models?.claude,
         cwd: options.cwd,
         persist: options.persist,
+        direct: true,
       }),
       invoke("codex", backends.codex, codexPrompt, {
         sessionName: codexSessionName,
         model: options.models?.codex,
         cwd: options.cwd,
         persist: options.persist,
+        direct: true,
       }),
     ]);
     return { sessionId, claude, codex };
@@ -214,7 +216,7 @@ export async function runReviewers(
       model: options.models?.claude,
       cwd: options.cwd,
       persist: options.persist,
-      inspect: options.inspect,
+      direct: options.direct,
       reviewId: sessionId,
       round,
       reviewer: "claude",
@@ -231,7 +233,7 @@ export async function runReviewers(
       model: options.models?.codex,
       cwd: options.cwd,
       persist: options.persist,
-      inspect: options.inspect,
+      direct: options.direct,
       reviewId: sessionId,
       round,
       reviewer: "codex",
