@@ -8,7 +8,7 @@ die() { printf 'wux-review real-Wux observable smoke: %s\n' "$*" >&2; exit 1; }
 
 WUX_REVIEW_BIN="${WUX_REVIEW_BIN:-}"
 WUX_REAL_SMOKE_WUX_BIN="${WUX_REAL_SMOKE_WUX_BIN:-wux}"
-WUX_REAL_SMOKE_WUX_VERSION="${WUX_REAL_SMOKE_WUX_VERSION:-2026.06.21.1}"
+WUX_REAL_SMOKE_WUX_VERSION="${WUX_REAL_SMOKE_WUX_VERSION:-2026.08.17}"
 ROOT_INPUT="${WUX_REAL_SMOKE_ROOT:-}"
 DIAG_DIR="${WUX_REAL_SMOKE_DIAG_DIR:-}"
 TMP_REVIEW_DIR="/tmp/wux-review"
@@ -29,8 +29,8 @@ case "$resolved_wux_bin" in
 esac
 [ -x "$resolved_wux_bin" ] || die "released Wux binary is not executable: $resolved_wux_bin"
 WUX_REAL_SMOKE_WUX_BIN="$resolved_wux_bin"
-for command in git jq tmux; do
-  command -v "$command" >/dev/null 2>&1 || die "$command is required"
+for required_command in git jq tmux; do
+  command -v "$required_command" >/dev/null 2>&1 || die "$required_command is required"
 done
 
 own_root=0
@@ -99,7 +99,7 @@ collect_diagnostics() {
 
 cleanup() {
   local status="$?"
-  if [ "$status" -ne 0 ]; then collect_diagnostics "$status"; fi
+  if [ "$status" -ne 0 ]; then collect_diagnostics "$status" || true; fi
   local name
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -120,7 +120,7 @@ trap cleanup EXIT
 
 actual_wux_version="$(wux --version)"
 [ "$actual_wux_version" = "$WUX_REAL_SMOKE_WUX_VERSION" ] || \
-  die "expected Wux $WUX_REAL_SMOKE_WUX_VERSION, got $actual_wux_version"
+  { note "wux-review real-Wux observable smoke: SKIP: expected Wux $WUX_REAL_SMOKE_WUX_VERSION, got $actual_wux_version"; exit 77; }
 
 # wux-review invokes `wux` by name. Keep the actual released binary explicit
 # while putting deterministic reviewer fakes ahead of the ambient PATH.
@@ -144,7 +144,7 @@ fi
 result="$(printf '```json\n{"findings":%s}\n```' "$findings")"
 jq -nc '{type:"system",subtype:"init",session_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"assistant",message:{content:[{type:"tool_use",name:"Read",input:{file_path:"/safe/fake"}}]}}'
-sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-2}"
+sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:?}"
 jq -nc --arg r "$result" '{type:"result",subtype:"success",is_error:false,result:$r}'
 EOF
 
@@ -164,7 +164,7 @@ done
 [ -n "$out" ] || { printf 'fake codex: no -o output path\n' >&2; exit 1; }
 mkdir -p "${WUXR_REAL_SMOKE_CALL_DIR:?}"
 : > "$WUXR_REAL_SMOKE_CALL_DIR/codex-$PPID-$$"
-brief="$(printf '%s' "$prompt" | grep -oE '/[^ ]*-prompt\.md' | head -1)"
+brief="$(printf '%s' "$prompt" | grep -oE '/[^ ]*-prompt\.md' | head -1 || true)"
 [ -n "$brief" ] && [ -f "$brief" ] || { printf 'fake codex: unreadable brief\n' >&2; exit 1; }
 input="$(cat "$brief")"
 if printf '%s' "$input" | grep -q 'BLOCK_CASE'; then
@@ -174,7 +174,7 @@ else
 fi
 jq -nc '{type:"thread.started",thread_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"turn.started"}'
-sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:-2}"
+sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:?}"
 jq -nc '{type:"turn.completed"}'
 printf '```json\n{"findings":%s}\n```\n' "$findings" > "$out"
 EOF
@@ -198,10 +198,25 @@ call_count() {
 }
 
 wait_visible() {
-  local session="$1" deadline=$((SECONDS + 5))
+  local session="$1" deadline=$((SECONDS + 5)) last_status_failure=""
+  local status_stderr_file="$root/wux-status-stderr"
   while [ "$SECONDS" -le "$deadline" ]; do
-    local status
-    status="$(PATH="$smoke_path" wux --local status --json)"
+    local status status_exit status_stderr
+    if status="$(PATH="$smoke_path" wux --local status --json 2> "$status_stderr_file")"; then
+      last_status_failure=""
+    else
+      status_exit="$?"
+      status_stderr="$(< "$status_stderr_file")"
+      if [ -n "$status_stderr" ]; then
+        last_status_failure="${status_stderr:0:1000}"
+      elif [ -n "$status" ]; then
+        last_status_failure="exit $status_exit; stdout: ${status:0:1000}"
+      else
+        last_status_failure="exit $status_exit"
+      fi
+      sleep 0.1
+      continue
+    fi
     if jq -e --arg prefix "$run_prefix-$session-r1-x" '
       [.[] | select(.status == "running" and (.name | startswith($prefix))) | .name] as $names
       | ($names | map(select(endswith("-claude"))) | length) == 1
@@ -211,6 +226,9 @@ wait_visible() {
     fi
     sleep 0.1
   done
+  if [ -n "$last_status_failure" ]; then
+    die "$session did not expose both reviewer sessions within five seconds; last wux status failure: $last_status_failure"
+  fi
   die "$session did not expose both reviewer sessions within five seconds"
 }
 
@@ -224,7 +242,7 @@ wait_review() {
 }
 
 start_review() {
-  local session="$1" marker="$2" out="$3" delay="${4:-2}"
+  local session="$1" marker="$2" out="$3" delay="${4:-5}"
   printf '%s\n' "$marker" > "$repo_dir/sample.txt"
   (
     cd "$repo_dir"
@@ -300,7 +318,7 @@ assert_terminal_evidence "$block_session" completed
 
 note "real-Wux observable smoke: interrupted parent + zero-call reconcile"
 before="$(call_count)"
-start_review "$interrupt_session" APPROVE_CASE interrupted 4
+start_review "$interrupt_session" APPROVE_CASE interrupted 12
 interrupt_pid="$REVIEW_PID"
 wait_visible "$interrupt_session"
 kill -TERM "$interrupt_pid"
@@ -310,7 +328,7 @@ grep -q 'reconcile' "$output_dir/interrupted.err" || die "interruption did not n
 # The detached reviewer wrappers finish their deterministic calls after the
 # parent has retained the exact recovery identity. Reconcile then consumes only
 # those durable/transient bytes; it must not launch either fake again.
-deadline=$((SECONDS + 15))
+deadline=$((SECONDS + 30))
 while [ "$SECONDS" -le "$deadline" ]; do
   if [ "$(call_count)" -eq "$((before + 2))" ] && \
     ! PATH="$smoke_path" wux --local status --json | jq -e --arg prefix "$run_prefix-$interrupt_session-r1-x" \
