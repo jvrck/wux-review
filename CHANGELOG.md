@@ -11,6 +11,8 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+## 2026.08.17
+
 - **Verified Darwin releases.** Darwin ARM64 release binaries are now explicitly
   ad-hoc signed on macOS and must pass signature verification before upload,
   native validation, checksum generation, and publication.
