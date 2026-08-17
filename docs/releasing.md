@@ -21,21 +21,24 @@ releases on the same day) and are cut by pushing a matching tag.
   an in-progress run that may be publishing.
 - Validates the CalVer tag and confirms its target commit is reachable from
   `main` before creating or reusing a draft GitHub Release.
-- Cross-compiles four stamped binaries — `wux-review-linux-x64`,
+- Builds four stamped binaries — `wux-review-linux-x64`,
   `wux-review-linux-arm64`, `wux-review-darwin-arm64`, and
-  `wux-review-linux-x64-musl` — and attaches them to the draft release. Draft
-  release assets, not Actions artifacts, carry binaries between workflow jobs.
+  `wux-review-linux-x64-musl` — and attaches them to the draft release. Linux
+  targets remain cross-compiled on Ubuntu; Darwin ARM64 is built on macOS,
+  explicitly ad-hoc signed, and verified before upload. Draft release assets,
+  not Actions artifacts, carry binaries between workflow jobs.
 - Validates every binary from that draft on its native target: Linux x64, Linux
   ARM64, Darwin ARM64, and Alpine for musl. Each validation checks `--version`,
-  `--help`, and `scripts/smoke-release-asset.sh`.
+  `--help`, and `scripts/smoke-release-asset.sh`; Darwin validation also fails
+  closed unless `/usr/bin/codesign --verify --verbose=4` succeeds.
 - Installs Bun 1.3.9 and the frozen dependency graph, generates a CycloneDX
   SBOM, and requires at least 80 SBOM components before its HIGH/CRITICAL
   fixable-vulnerability scan can pass. This floor keeps the release security
   gate non-vacuous.
-- Creates `SHA256SUMS` and verifies the draft contains exactly six assets: the
-  four binaries, `sbom.cdx.json`, and `SHA256SUMS`. Only after all native
-  validation, SBOM scanning, and exact-asset checks pass does it publish the
-  draft as the latest release.
+- Creates `SHA256SUMS` from the final binaries after Darwin signing and verifies
+  the draft contains exactly six assets: the four binaries, `sbom.cdx.json`,
+  and `SHA256SUMS`. Only after all native validation, SBOM scanning, and
+  exact-asset checks pass does it publish the draft as the latest release.
 - Refuses any selected rerun that would operate on an already published release:
   the create/reuse, binary-build/upload, and publish jobs each fail closed
   rather than overwriting public assets. A published release must be deleted to

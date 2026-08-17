@@ -82,7 +82,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.asset }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs: create-release
     permissions:
       contents: write
@@ -92,12 +92,16 @@ jobs:
         include:
           - target: bun-linux-x64
             asset: wux-review-linux-x64
+            os: ubuntu-latest
           - target: bun-linux-arm64
             asset: wux-review-linux-arm64
+            os: ubuntu-latest
           - target: bun-darwin-arm64
             asset: wux-review-darwin-arm64
+            os: macos-15
           - target: bun-linux-x64-musl
             asset: wux-review-linux-x64-musl
+            os: ubuntu-latest
     steps:
       - name: Assert release is still a draft
         # Same fail-closed guard as the publish job. A selected re-run of just
@@ -134,6 +138,14 @@ jobs:
           if [ "${{ matrix.target }}" = "bun-linux-x64" ]; then
             test "$(./dist/${{ matrix.asset }} --version)" = "$VERSION"
           fi
+      - name: Sign and verify Darwin binary
+        if: matrix.asset == 'wux-review-darwin-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_path="dist/${{ matrix.asset }}"
+          /usr/bin/codesign --force --sign - "$asset_path"
+          scripts/verify-darwin-signature.sh "$asset_path"
       - name: Upload binary to draft release
         # Replaces actions/upload-artifact: the binary is carried to the
         # validate and publish jobs as an asset on the draft release.
@@ -186,6 +198,11 @@ jobs:
         run: |
           set -euo pipefail
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "$ASSET" -D "$RUNNER_TEMP/release-assets/$ASSET" --clobber
+
+      - name: Verify Darwin signature
+        if: matrix.asset == 'wux-review-darwin-arm64'
+        shell: bash
+        run: scripts/verify-darwin-signature.sh "$RUNNER_TEMP/release-assets/$ASSET/$ASSET"
 
       - name: Verify build artifact
         id: artifact

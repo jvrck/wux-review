@@ -7,15 +7,17 @@ Two layers validate a release.
 The tag workflow creates or reuses a draft release, uploads the four compiled
 binaries to that draft, and validates them before publication on Linux x64,
 Linux ARM64, Darwin ARM64, and Alpine for the musl build. Each path checks the
-version, help output, and `scripts/smoke-release-asset.sh`.
+version, help output, and `scripts/smoke-release-asset.sh`. The Darwin binary is
+built on macOS, explicitly ad-hoc signed, and verified before draft upload; its
+native validation fails closed on the same signature check before execution.
 
 After native validation, the workflow installs Bun 1.3.9 and the frozen
 dependency graph, generates a CycloneDX SBOM, requires at least 80 components,
 and runs the HIGH/CRITICAL fixable-vulnerability scan. It then writes
-`SHA256SUMS` and checks that the draft has exactly the four binaries plus
-`sbom.cdx.json` and `SHA256SUMS` before publishing it as latest. The assets move
-between jobs on the draft release, not through Actions artifacts. A failure
-leaves the release as a draft.
+`SHA256SUMS` over the final signed bytes and checks that the draft has exactly
+the four binaries plus `sbom.cdx.json` and `SHA256SUMS` before publishing it as
+latest. The assets move between jobs on the draft release, not through Actions
+artifacts. A failure leaves the release as a draft.
 
 The workflow serializes same-tag retries. It can reuse only a draft release;
 its create/reuse, build/upload, and publish jobs each refuse to run against an
@@ -25,8 +27,9 @@ already published release, so a selected rerun cannot clobber public assets.
 
 `.github/workflows/validate-release.yml` is `workflow_dispatch` with a `tag`
 input. It downloads the published assets and `SHA256SUMS`, verifies the checksum,
-checks `--version`, and re-runs the smoke on the same native/musl matrix. Use it
-to re-validate an existing release without re-cutting it.
+checks the Darwin signature, checks `--version`, and re-runs the smoke on the
+same native/musl matrix. Use it to re-validate an existing release without
+re-cutting it.
 
 ## PR install proof
 
