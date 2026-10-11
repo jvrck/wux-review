@@ -17,7 +17,7 @@ jobs:
     name: Dependency scan (reporting)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v6.1.0
       - name: Verify lockfile form
         run: test -f bun.lock && ! test -f bun.lockb
       - name: Install security scanners
@@ -34,7 +34,7 @@ jobs:
         # upload (e.g. the Actions artifact-storage quota) fail the job — the real
         # HIGH/CRITICAL gate is the separate security-gate job.
         continue-on-error: true
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: dependency-security-reports
           path: |
@@ -47,7 +47,7 @@ jobs:
     name: HIGH/CRITICAL fixable gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v6.1.0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.3.9'
