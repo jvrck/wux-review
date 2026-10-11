@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v6.1.0
         with:
           ref: ${{ github.event.inputs.ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
@@ -65,7 +65,7 @@ jobs:
           test "$(./dist/wux-review-linux-x64 --version)" = "$PREVIEW_VERSION"
           cd dist
           sha256sum wux-review-* > SHA256SUMS
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ steps.source.outputs.artifact_name }}
           path: |
