@@ -164,6 +164,10 @@ export interface HeadlessRunOptions {
   // result window, while Codex's authoritative verdict comes from `-o`.
   stdoutTailBytes?: number;
   stderrTailBytes?: number;
+  // Direct Codex execution parses its complete machine stream incrementally.
+  // The retained stdout tail remains diagnostic/evidence plumbing only, so an
+  // early lifecycle error cannot fall out of the fixed-size tail window.
+  onStdoutChunk?: (bytes: Uint8Array) => void;
   // Extra environment merged over the parent env (undefined inherits it
   // unchanged). Used to point the codex leg at an isolated CODEX_HOME.
   env?: Record<string, string>;
@@ -215,6 +219,7 @@ export const defaultHeadlessRun: HeadlessRun = async (cmd, opts) => {
       readAll(
         outReader,
         opts.stdoutTailBytes ?? HEADLESS_DEFAULT_STDOUT_TAIL_BYTES,
+        opts.onStdoutChunk,
       ),
       readAll(
         errReader,
@@ -244,6 +249,7 @@ export const defaultHeadlessRun: HeadlessRun = async (cmd, opts) => {
 async function readAll(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   tailLimitBytes: number,
+  onChunk?: (bytes: Uint8Array) => void,
 ): Promise<{
   text: string;
   truncated: boolean;
@@ -289,6 +295,7 @@ async function readAll(
       const { done, value } = await reader.read();
       if (done) break;
       if (value === undefined) continue;
+      onChunk?.(value);
       ensureCapacity(value.byteLength);
       if (value.byteLength >= tail.byteLength) {
         tail.set(value.subarray(value.byteLength - tail.byteLength));
@@ -842,6 +849,7 @@ interface ExecLegInput {
   recordEvidence?: BackendOptions["recordEvidence"];
   env?: Record<string, string>;
   cwd: string;
+  onStdoutChunk?: (bytes: Uint8Array) => void;
 }
 
 async function execLeg(
@@ -892,6 +900,7 @@ async function execLeg(
       ? HEADLESS_DEFAULT_STDOUT_TAIL_BYTES
       : MACHINE_EVENT_PARSE_LIMIT_BYTES + 2,
     stderrTailBytes: HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
+    onStdoutChunk: input.onStdoutChunk,
   });
 }
 
@@ -1164,6 +1173,10 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           // Clear any stale last-message (from a prior run reusing this session
           // name, or a prior attempt) so a failed attempt can't read an old verdict.
           await deps.rm(outPath);
+          const directParser = opts.direct === true
+            ? new MachineEventParser("codex")
+            : undefined;
+          let directStreamObserved = false;
           let result: HeadlessRunResult;
           try {
             result = await execLeg(deps, opts, {
@@ -1182,6 +1195,12 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               },
               env: home?.env,
               cwd: reviewerCwd.path,
+              onStdoutChunk: directParser === undefined
+                ? undefined
+                : (bytes) => {
+                  directStreamObserved = true;
+                  directParser.push(bytes);
+                },
             });
           } catch (error) {
             observableCleanupTransferred = opts.direct !== true
@@ -1202,7 +1221,11 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           }
           const signal = opts.direct !== true
             ? result.codexSignal
-            : codexSignalFromDirectStdout(result.stdout);
+            : codexSignalFromDirectStdout(
+              result.stdout,
+              directParser,
+              directStreamObserved,
+            );
           const signalFailure = codexExecutionFailure(signal, result.stderr);
           // Sandbox startup failures are deterministic on an affected host, so
           // retrying burns the full Codex retry budget without creating a review.
@@ -1279,9 +1302,19 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
   };
 }
 
-function codexSignalFromDirectStdout(stdout: string) {
-  const parser = new MachineEventParser("codex");
-  parser.push(new TextEncoder().encode(stdout));
+function codexSignalFromDirectStdout(
+  stdout: string,
+  parser?: MachineEventParser,
+  streamObserved = false,
+) {
+  // Injected test runners predate incremental observation and do not invoke the
+  // callback. Keep their bounded fixture seam while production always observes
+  // the whole stream as it drains.
+  if (!streamObserved) {
+    parser = new MachineEventParser("codex");
+    parser.push(new TextEncoder().encode(stdout));
+  }
+  parser ??= new MachineEventParser("codex");
   parser.finish();
   return parser.codexExecutionSignal();
 }

@@ -32,7 +32,7 @@ const BLOCK =
 const AT = "2026-07-28T00:00:00Z";
 const CODEX_COMMAND = JSON.stringify({
   type: "item.completed",
-  item: { type: "command_execution" },
+  item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 
 function transportBackend(kind: "claude" | "codex", report: string): ReturnType<typeof createClaudeHeadlessBackend> {

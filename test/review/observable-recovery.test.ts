@@ -239,7 +239,7 @@ function recoveryHarness(options: {
         ? CLAUDE_STREAM
         : `${JSON.stringify({
             type: "item.completed",
-            item: { type: "command_execution" },
+            item: { type: "command_execution", exit_code: 0, status: "completed" },
           })}\n`,
     );
     if (record.reviewer === "codex") {

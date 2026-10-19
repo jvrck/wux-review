@@ -270,18 +270,37 @@ export class MachineEventParser {
 
   private observeCodexExecution(value: unknown): void {
     if (this.reviewer !== "codex" || !isRecord(value) || typeof value.type !== "string") return;
-    if (value.type === "error") this.codexSignal.sawError = true;
-    if (value.type === "turn.failed") this.codexSignal.sawTurnFailed = true;
-    if (
-      value.type === "item.completed"
-      && isRecord(value.item)
-      && value.item.type === "command_execution"
-    ) {
-      this.codexSignal.commandExecutions++;
+    if (value.type === "error") {
+      this.codexSignal.sawError = true;
+      this.noteSandboxDiagnostic(value.message);
+      return;
     }
-    // Do not retain or render event text. We only preserve the stable sandbox
-    // classification needed to choose the deterministic no-retry path.
-    if (sandboxUnavailable(JSON.stringify(value))) {
+    if (value.type === "turn.failed") {
+      this.codexSignal.sawTurnFailed = true;
+      this.noteSandboxDiagnostic(value.error);
+      return;
+    }
+    if (!isRecord(value.item) || value.item.type !== "command_execution") return;
+
+    const item = value.item;
+    // A command that was launched can have a non-zero exit code, but it still
+    // read the brief. A spawn failure has no numeric exit code and must not
+    // satisfy the fail-closed command-count check.
+    if (value.type === "item.completed" && typeof item.exit_code === "number") {
+      this.codexSignal.commandExecutions++;
+      return;
+    }
+    // Only failed/unlaunched command items may expose their output as Codex's
+    // own diagnostic. Never inspect a completed command's aggregated output:
+    // `cat <brief>` contains reviewed, attacker-controlled diff text.
+    if (typeof item.exit_code !== "number" || item.status !== "completed") {
+      this.noteSandboxDiagnostic(item.aggregated_output);
+      this.noteSandboxDiagnostic(item.error);
+    }
+  }
+
+  private noteSandboxDiagnostic(value: unknown): void {
+    if (sandboxUnavailable(diagnosticText(value))) {
       this.codexSignal.sandboxUnavailable = true;
     }
   }
@@ -362,6 +381,15 @@ export class MachineEventParser {
 
 function sandboxUnavailable(text: string): boolean {
   return /Refusing to create helper binaries|Unable to spawn codex-linux-sandbox/i.test(text);
+}
+
+// Keep classification scoped to known diagnostic fields. In particular, do not
+// serialize an event: machine events often include command output copied from
+// the untrusted review brief.
+function diagnosticText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && typeof value.message === "string") return value.message;
+  return "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

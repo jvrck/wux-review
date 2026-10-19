@@ -21,12 +21,13 @@ import { buildObservableWrapperScript } from "../../src/backends/observable";
 import {
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
+  MachineEventParser,
 } from "../../src/backends/observable-events";
 
 const REPORT = '```json\n{"findings":[]}\n```';
 const CODEX_COMMAND = JSON.stringify({
   type: "item.completed",
-  item: { type: "command_execution" },
+  item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
 const CODEX_HOME_ROOT = join(
@@ -173,7 +174,7 @@ function harness(opts: Opts = {}) {
       }
       const seq = opts.runResults?.[legRunIdx];
       legRunIdx++;
-      return {
+      const result = {
         code: 0,
         stdout: cmd[0] === "codex"
           ? opts.codexStdout ?? CODEX_COMMAND
@@ -183,6 +184,10 @@ function harness(opts: Opts = {}) {
         ...opts.runResult,
         ...(seq ?? {}),
       };
+      if (cmd[0] === "codex" && result.stdout !== undefined) {
+        runOpts.onStdoutChunk?.(Buffer.from(result.stdout));
+      }
+      return result;
     },
     mkdir: async (path) => {
       if (opts.mkdirThrows) throw new Error("mkdir failed");
@@ -689,6 +694,44 @@ describe("createCodexHeadlessBackend", () => {
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "sandbox-unavailable",
+      direct: true,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("does not mistake sandbox strings in a completed brief-read for diagnostics", async () => {
+    const codexStdout = JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        aggregated_output: "Refusing to create helper binaries; Unable to spawn codex-linux-sandbox",
+        exit_code: 0,
+        status: "completed",
+      },
+    });
+    for (const direct of [true, false]) {
+      const h = harness({ codexStdout });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `completed-brief-${direct}`,
+        direct,
+      })).resolves.toBe(REPORT);
+    }
+  });
+
+  test("fails an unlaunched sandbox command fast without retrying", async () => {
+    const h = harness({
+      codexRetries: 3,
+      codexStdout: JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          aggregated_output: "Unable to spawn codex-linux-sandbox",
+          status: "failed",
+        },
+      }),
+    });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "failed-sandbox-command",
       direct: true,
     })).rejects.toThrow("sandbox unavailable");
     expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
@@ -1571,6 +1614,22 @@ describe("defaultHeadlessRun (real process)", () => {
     expect(r.stdout.endsWith("final")).toBe(true);
     expect(r.stdoutTruncated).toBe(true);
     expect(r.stdoutTailStartsAtLineBoundary).toBe(false);
+  });
+
+  test("streams early machine events to a direct signal observer beyond the stdout tail", async () => {
+    const parser = new MachineEventParser("codex");
+    const earlyError = `${JSON.stringify({ type: "error", message: "early failure" })}\n`;
+    const r = await defaultHeadlessRun(
+      [process.execPath, "-e", `process.stdout.write(${JSON.stringify(earlyError)} + "x".repeat(300_000))`],
+      {
+        timeoutMs: 5000,
+        stdoutTailBytes: 32,
+        onStdoutChunk: (bytes) => parser.push(bytes),
+      },
+    );
+    parser.finish();
+    expect(r.stdout).not.toContain("early failure");
+    expect(parser.codexExecutionSignal()?.sawError).toBe(true);
   });
 
   test("detects a real truncated tail that starts exactly after a newline", async () => {

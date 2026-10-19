@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  codexExecutionFailure,
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MachineEventParser,
   machineStreamChunkRecord,
@@ -17,6 +18,39 @@ function split(bytes: Uint8Array, points: number[]): Uint8Array[] {
 }
 
 describe("observable machine-event capture", () => {
+  test("Codex classifies only its own diagnostics and commands that actually ran", () => {
+    const parser = new MachineEventParser("codex");
+    parser.push(Buffer.from(`${JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        aggregated_output: "Refusing to create helper binaries; Unable to spawn codex-linux-sandbox",
+        exit_code: 0,
+        status: "completed",
+      },
+    })}\n`));
+    expect(codexExecutionFailure(parser.codexExecutionSignal(), "")).toBeUndefined();
+
+    const failedSpawn = new MachineEventParser("codex");
+    failedSpawn.push(Buffer.from(`${JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        aggregated_output: "Unable to spawn codex-linux-sandbox",
+        status: "failed",
+      },
+    })}\n`));
+    expect(codexExecutionFailure(failedSpawn.codexExecutionSignal(), ""))
+      .toBe("sandbox unavailable");
+    expect(failedSpawn.codexExecutionSignal()?.commandExecutions).toBe(0);
+
+    const nonZero = new MachineEventParser("codex");
+    nonZero.push(Buffer.from(`${JSON.stringify({
+      type: "item.completed",
+      item: { type: "command_execution", exit_code: 1, status: "failed" },
+    })}\n`));
+    expect(nonZero.codexExecutionSignal()?.commandExecutions).toBe(1);
+  });
   test("base64 chunk records reconstruct raw JSONL byte-for-byte across partial writes", async () => {
     const raw = await Bun.file(
       new URL("../fixtures/observable/claude-stream.jsonl", import.meta.url),
