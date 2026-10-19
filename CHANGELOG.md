@@ -11,6 +11,14 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **Fail-closed Codex reviews.** Codex legs now reject sandbox and turn errors,
+  or a run with no completed command, instead of approving empty findings. Their
+  private `CODEX_HOME` now lives in a mode-`0700` per-user state directory so
+  Codex 0.162+ can start its sandbox. Codex approvals on affected hosts since
+  that release should be treated as unreliable.
+
 ### Security
 
 - **Dependency security refresh.** Updated the MCP SDK and its resolved

@@ -1,8 +1,8 @@
 import { constants as fsConstants } from "node:fs";
 import type { Dirent } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
 import type { Backend, BackendOptions } from "../review/reviewers";
 import type { ReviewerName } from "../review/types";
@@ -13,7 +13,10 @@ import {
   type ObservableAdapterDeps,
 } from "./observable";
 import {
+  codexExecutionFailure,
+  MachineEventParser,
   isClaudeResultEvent,
+  MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
 } from "./observable-events";
 
@@ -176,6 +179,7 @@ export interface HeadlessRunResult {
   // Candidate observable transport only: a validated output file (Codex `-o`)
   // read back through the atomic result.json contract.
   structuredOutput?: string;
+  codexSignal?: import("./observable-events").CodexExecutionSignal;
 }
 
 export type HeadlessRun = (cmd: string[], opts: HeadlessRunOptions) => Promise<HeadlessRunResult>;
@@ -655,7 +659,9 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
   const source = resolve(process.env.CODEX_HOME ?? join(homedir(), ".codex"));
   let createdHome: string | undefined;
   try {
-    createdHome = await mkdtemp(join(tmpdir(), "wuxr-codex-home-"));
+    const root = await secureCodexHomeRoot();
+    await pruneStaleCodexHomes(root);
+    createdHome = await mkdtemp(join(root, "wuxr-codex-home-"));
     await chmod(createdHome, 0o700);
   } catch (error) {
     if (createdHome !== undefined) {
@@ -748,6 +754,54 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
   }
 }
 
+// Only an absolute XDG state directory is valid. A relative value is explicitly
+// ignored by the XDG base-directory spec, avoiding a state path controlled by a
+// caller's current directory.
+export function codexHomeRoot(): string {
+  const xdg = process.env.XDG_STATE_HOME;
+  const stateHome = xdg !== undefined && xdg !== "" && isAbsolute(xdg)
+    ? xdg
+    : join(homedir(), ".local", "state");
+  return join(stateHome, "wux-review", "codex-homes");
+}
+
+async function secureCodexHomeRoot(): Promise<string> {
+  const root = codexHomeRoot();
+  try {
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    const metadata = await lstat(root);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || (uid !== undefined && metadata.uid !== uid)) {
+      throw new Error("state root is not a real directory owned by the current user");
+    }
+    await chmod(root, 0o700);
+    return root;
+  } catch (error) {
+    throw new WuxReviewError(
+      `codex reviewer: cannot create secure per-leg CODEX_HOME root: ${errorDetail(error)}`,
+    );
+  }
+}
+
+async function pruneStaleCodexHomes(root: string): Promise<void> {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    await Promise.all(entries.map(async (entry) => {
+      if (!entry.name.startsWith("wuxr-codex-home-")) return;
+      const path = join(root, entry.name);
+      const metadata = await lstat(path);
+      // lstat is intentional: symlinks are never followed or removed here.
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.mtimeMs >= cutoff) return;
+      await rm(path, { recursive: true, force: true });
+    }));
+  } catch (error) {
+    // Pruning is hygiene only. A valid new isolated home is more important than
+    // deleting an old one, so failure remains visible but never blocks a leg.
+    process.stderr.write(`codex reviewer: stale-home pruning failed: ${oneLine(errorDetail(error))}\n`);
+  }
+}
+
 export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<ReviewerCwd> {
   let createdPath: string | undefined;
   try {
@@ -836,7 +890,7 @@ async function execLeg(
     env: input.env,
     stdoutTailBytes: input.reviewer === "claude"
       ? HEADLESS_DEFAULT_STDOUT_TAIL_BYTES
-      : 0,
+      : MACHINE_EVENT_PARSE_LIMIT_BYTES + 2,
     stderrTailBytes: HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
   });
 }
@@ -1146,6 +1200,17 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               ? new ObservableLifecycleError(message, "timed_out")
               : new WuxReviewError(message);
           }
+          const signal = opts.direct !== true
+            ? result.codexSignal
+            : codexSignalFromDirectStdout(result.stdout);
+          const signalFailure = codexExecutionFailure(signal, result.stderr);
+          // Sandbox startup failures are deterministic on an affected host, so
+          // retrying burns the full Codex retry budget without creating a review.
+          // Other machine-stream failures (turn/error/zero commands) may be
+          // transient and therefore retain the established bounded retry policy.
+          if (signalFailure === "sandbox unavailable") {
+            throw codexFailureError("sandbox unavailable", opts.direct !== true);
+          }
           // In observable mode, result.json is the only verdict
           // source. The adapter has already copied and validated Codex's `-o`
           // output into `structuredOutput`; never reach around that contract to
@@ -1155,7 +1220,12 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               ? result.structuredOutput
               : await deps.readFile(outPath)
             : undefined;
-          if (result.code === 0 && last !== undefined && last.trim() !== "") {
+          if (
+            result.code === 0
+            && signalFailure === undefined
+            && last !== undefined
+            && last.trim() !== ""
+          ) {
             if (attempt > 0) {
               deps.warn(`codex reviewer: recovered on attempt ${attempt + 1}/${maxRetries + 1}`);
             }
@@ -1167,13 +1237,18 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           const nonZero = result.code !== 0;
           // JSONL stdout can contain commands, tool payloads, model text, and
           // reasoning summaries. It is durable evidence, not a safe diagnostic.
-          const detail = nonZero ? oneLine(result.stderr) || `exit ${result.code}` : "produced no final message";
+          const detail = nonZero
+            ? oneLine(result.stderr) || `exit ${result.code}`
+            : signalFailure ?? "produced no final message";
           if (attempt >= maxRetries) {
             const suffix = attempt > 0 ? ` after ${attempt + 1} attempts` : "";
-            throw new WuxReviewError(
+            throw codexFailureError(
               nonZero
-                ? `codex reviewer: codex exec failed${suffix}: ${detail}`
-                : `codex reviewer: codex exec produced no final message${suffix}`,
+                ? `codex exec failed${suffix}: ${detail}`
+                : signalFailure === undefined
+                  ? `codex exec produced no final message${suffix}`
+                  : `codex reviewer: ${detail}${suffix}`,
+              opts.direct !== true,
             );
           }
           const backoffMs = deps.codexRetryBaseMs * 2 ** attempt;
@@ -1202,6 +1277,20 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
       }
     }
   };
+}
+
+function codexSignalFromDirectStdout(stdout: string) {
+  const parser = new MachineEventParser("codex");
+  parser.push(new TextEncoder().encode(stdout));
+  parser.finish();
+  return parser.codexExecutionSignal();
+}
+
+function codexFailureError(message: string, observable: boolean): WuxReviewError {
+  const prefixed = message.startsWith("codex reviewer:") ? message : `codex reviewer: ${message}`;
+  return observable
+    ? new ObservableLifecycleError(prefixed, "failed")
+    : new WuxReviewError(prefixed);
 }
 
 // Guard the session name before it is interpolated into temp-file paths. The

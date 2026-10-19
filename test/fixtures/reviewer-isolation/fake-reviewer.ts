@@ -59,6 +59,10 @@ if (reviewer === "codex") {
     await Bun.write(`${targetRepo}/owned.txt`, "MUTATED\n");
   }
   await Bun.write(args[output + 1]!, report);
+  process.stdout.write(JSON.stringify({
+    type: "item.completed",
+    item: { type: "command_execution" },
+  }));
   process.exit(0);
 }
 

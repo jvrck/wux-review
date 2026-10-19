@@ -35,6 +35,37 @@ export interface ParsedMachineEvent {
   diagnostic?: MachineEventDiagnostic;
 }
 
+// This is deliberately only a set of verdict-relevant facts, never a copy of
+// JSONL. Codex stdout can contain the reviewed diff and model reasoning, so it
+// must remain durable evidence rather than diagnostic text.
+export interface CodexExecutionSignal {
+  commandExecutions: number;
+  sawError: boolean;
+  sawTurnFailed: boolean;
+  sandboxUnavailable: boolean;
+}
+
+export function emptyCodexExecutionSignal(): CodexExecutionSignal {
+  return {
+    commandExecutions: 0,
+    sawError: false,
+    sawTurnFailed: false,
+    sandboxUnavailable: false,
+  };
+}
+
+export function codexExecutionFailure(
+  signal: CodexExecutionSignal | undefined,
+  stderr: string,
+): "sandbox unavailable" | "turn failed" | "reported error" | "ran zero commands" | undefined {
+  if (sandboxUnavailable(stderr) || signal?.sandboxUnavailable === true) return "sandbox unavailable";
+  if (signal === undefined) return "ran zero commands";
+  if (signal.sawTurnFailed) return "turn failed";
+  if (signal.sawError) return "reported error";
+  if (signal.commandExecutions === 0) return "ran zero commands";
+  return undefined;
+}
+
 // The raw stream evidence is byte-exact and immediately appendable even when a
 // CLI splits one JSON event across writes. Concatenating decoded `data` in
 // ascending `offset` order reconstructs stdout exactly, including malformed,
@@ -67,6 +98,7 @@ export class MachineEventParser {
   private claudeResultSegments: Uint8Array[] = [];
   private claudeResultBytes = 0;
   private discardingOversizedClaudeResult = false;
+  private readonly codexSignal = emptyCodexExecutionSignal();
 
   constructor(
     private readonly reviewer: ReviewerName,
@@ -125,6 +157,10 @@ export class MachineEventParser {
   // proportional to the actual verdict payload.
   finalResultEvent(): string | undefined {
     return this.lastClaudeResultEvent;
+  }
+
+  codexExecutionSignal(): CodexExecutionSignal | undefined {
+    return this.reviewer === "codex" ? { ...this.codexSignal } : undefined;
   }
 
   private consumeSegment(
@@ -215,6 +251,7 @@ export class MachineEventParser {
         diagnostic: { kind: "malformed" },
       };
     }
+    this.observeCodexExecution(value);
     if (
       allowClaudeResult
       && this.reviewer === "claude"
@@ -229,6 +266,24 @@ export class MachineEventParser {
         ? { diagnostic: { kind: "unknown" as const } }
         : {}),
     };
+  }
+
+  private observeCodexExecution(value: unknown): void {
+    if (this.reviewer !== "codex" || !isRecord(value) || typeof value.type !== "string") return;
+    if (value.type === "error") this.codexSignal.sawError = true;
+    if (value.type === "turn.failed") this.codexSignal.sawTurnFailed = true;
+    if (
+      value.type === "item.completed"
+      && isRecord(value.item)
+      && value.item.type === "command_execution"
+    ) {
+      this.codexSignal.commandExecutions++;
+    }
+    // Do not retain or render event text. We only preserve the stable sandbox
+    // classification needed to choose the deterministic no-retry path.
+    if (sandboxUnavailable(JSON.stringify(value))) {
+      this.codexSignal.sandboxUnavailable = true;
+    }
   }
 
   private consumeClaudeResultSegment(
@@ -303,6 +358,14 @@ export class MachineEventParser {
     this.discardingOversizedClaudeResult = false;
     return rejected;
   }
+}
+
+function sandboxUnavailable(text: string): boolean {
+  return /Refusing to create helper binaries|Unable to spawn codex-linux-sandbox/i.test(text);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function concatBytes(

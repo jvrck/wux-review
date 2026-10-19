@@ -1,6 +1,6 @@
 import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
@@ -21,6 +21,7 @@ import {
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_EVENT_READ_CHUNK_BYTES,
   MachineEventParser,
+  type CodexExecutionSignal,
   machineStreamChunkRecord,
   type ParsedMachineEvent,
 } from "./observable-events";
@@ -111,6 +112,7 @@ export interface ObservableLegInput {
 
 export interface ObservableLegResult extends ObservableRunResult {
   structuredOutput?: string;
+  codexSignal?: CodexExecutionSignal;
 }
 
 export interface ReconcileObservableLegInput {
@@ -155,6 +157,12 @@ const resultSchema = z.object({
     timedOut: z.literal(false),
   }).strict(),
   output: z.string().optional(),
+  codexSignal: z.object({
+    commandExecutions: z.number().int().nonnegative(),
+    sawError: z.boolean(),
+    sawTurnFailed: z.boolean(),
+    sandboxUnavailable: z.boolean(),
+  }).strict().optional(),
 }).strict();
 
 type ObservableResultFile = z.infer<typeof resultSchema>;
@@ -1112,6 +1120,9 @@ export async function runObservableLeg(
       REVIEWER_STDERR_TAIL_BYTES,
     );
     const output = input.outputPath === undefined ? undefined : await deps.readFile(input.outputPath);
+    const codexSignal = input.reviewer === "codex"
+      ? parser.codexExecutionSignal()
+      : undefined;
     await appendEvent(deps, evidencePath, {
       type: "review-leg-process-result",
       at: deps.now(),
@@ -1137,6 +1148,7 @@ export async function runObservableLeg(
       identity,
       process: { code: normalizedCode, stdout, stderr, timedOut: false },
       ...(output === undefined ? {} : { output }),
+      ...(codexSignal === undefined ? {} : { codexSignal }),
     };
     await publishResult(deps, resultPath, result, input.childName);
     await appendEvent(deps, evidencePath, {
@@ -1243,6 +1255,7 @@ export async function runObservableLeg(
       stderr: validated.process.stderr,
       timedOut: false,
       structuredOutput: validated.output,
+      codexSignal: validated.codexSignal,
     };
   } catch (caught) {
     let error = caught;
@@ -1577,6 +1590,9 @@ export async function reconcileObservableLeg(
         identity,
         process: { code, stdout, stderr, timedOut: false },
         ...(output === undefined ? {} : { output }),
+        ...(record.reviewer === "codex"
+          ? { codexSignal: parser.codexExecutionSignal() }
+          : {}),
       };
       await appendEvent(deps, record.evidencePath, {
         type: "review-leg-process-result",
@@ -1665,6 +1681,7 @@ export async function reconcileObservableLeg(
       stderr: validated.process.stderr,
       timedOut: false,
       structuredOutput: validated.output,
+      codexSignal: validated.codexSignal,
     };
   } catch (error) {
     const state = error instanceof ObservableLifecycleError
@@ -2927,7 +2944,7 @@ function recoveryTransientPaths(
   );
 }
 
-function validateObservableCleanup(
+export function validateObservableCleanup(
   files: string[] | undefined,
   dir: string | undefined,
   adapterTmpDir: string,
@@ -2942,20 +2959,40 @@ function validateObservableCleanup(
       throw new WuxReviewError(`unsafe observable cleanup file: ${JSON.stringify(path)}`);
     }
   }
-  if (
-    dir !== undefined
-    && (
-      !isAbsolute(dir)
-      || dir === "/"
-      || !resolve(dir).startsWith(`${resolve(tmpdir())}${sep}`)
-      || (
-        !basename(dir).startsWith("wuxr-codex-home-")
-        && !basename(dir).startsWith("wuxr-reviewer-cwd-")
-      )
-    )
-  ) {
+  if (dir !== undefined && !isValidCodexCleanupDir(dir)) {
     throw new WuxReviewError(`unsafe observable cleanup directory: ${JSON.stringify(dir)}`);
   }
+}
+
+function isValidCodexCleanupDir(dir: string): boolean {
+  if (!isAbsolute(dir) || dir === "/") return false;
+  const root = resolve(observableCodexHomeRoot());
+  const candidate = resolve(dir);
+  const name = basename(candidate);
+  if (dirname(candidate) === root && name.startsWith("wuxr-codex-home-")) {
+    return true;
+  }
+  const home = dirname(candidate);
+  return (
+    name.startsWith("wuxr-reviewer-cwd-")
+    && dirname(home) === root
+    && basename(home).startsWith("wuxr-codex-home-")
+  ) || (
+    // Claude still creates its independently-isolated cwd under tmpdir(). This
+    // is the only production non-Codex-home cleanup shape; accepting the exact
+    // direct child prefix preserves interruption cleanup without admitting a
+    // temp CODEX_HOME or arbitrary temporary path.
+    dirname(candidate) === resolve(tmpdir())
+    && name.startsWith("wuxr-reviewer-cwd-")
+  );
+}
+
+function observableCodexHomeRoot(): string {
+  const xdg = process.env.XDG_STATE_HOME;
+  const stateHome = xdg !== undefined && xdg !== "" && isAbsolute(xdg)
+    ? xdg
+    : join(homedir(), ".local", "state");
+  return join(stateHome, "wux-review", "codex-homes");
 }
 
 function shq(path: string): string {

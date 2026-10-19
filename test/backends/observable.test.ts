@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import {
   defaultObservableDeps,
   discardObservableLeg,
@@ -10,6 +10,7 @@ import {
   ObservableLifecycleError,
   runObservableLeg,
   scheduleFileRemoval,
+  validateObservableCleanup,
   type ObservableAdapterDeps,
   type ObservableLegInput,
   type ObservableRunOptions,
@@ -25,6 +26,34 @@ const CLAUDE_STREAM = JSON.stringify({
   subtype: "success",
   is_error: false,
   result: REPORT,
+});
+const CODEX_HOME_ROOT = join(
+  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
+    ? process.env.XDG_STATE_HOME
+    : homedir(),
+  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
+    ? "wux-review"
+    : ".local/state/wux-review",
+  "codex-homes",
+);
+
+test("validateObservableCleanup accepts only expected Codex home shapes", () => {
+  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
+  const cwd = join(home, "wuxr-reviewer-cwd-def");
+  expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
+  for (const unsafe of [
+    "/",
+    "relative",
+    join(CODEX_HOME_ROOT, "..", "outside"),
+    join(CODEX_HOME_ROOT, "wrong-name"),
+    join(tmpdir(), "wuxr-codex-home-old-location"),
+    join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
+  ]) {
+    expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(
+      "unsafe observable cleanup directory",
+    );
+  }
 });
 
 interface HarnessOptions {
