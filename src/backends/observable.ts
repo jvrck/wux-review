@@ -163,6 +163,10 @@ const resultSchema = z.object({
     sawError: z.boolean(),
     sawTurnFailed: z.boolean(),
     sandboxUnavailable: z.boolean(),
+    // A pre-repair result lacks this field. It is safe to read as false because
+    // the rest of the signal is still present; a missing whole signal fails
+    // closed in codexExecutionFailure().
+    unclassifiedOversized: z.boolean().optional().default(false),
   }).strict().optional(),
 }).strict();
 
@@ -1120,6 +1124,9 @@ export async function runObservableLeg(
       stderrSnapshotBytes,
       REVIEWER_STDERR_TAIL_BYTES,
     );
+    if (input.reviewer === "codex") {
+      await observeStderrSnapshot(deps, stderrPath, stderrSnapshotBytes, parser);
+    }
     const output = input.outputPath === undefined ? undefined : await deps.readFile(input.outputPath);
     const codexSignal = input.reviewer === "codex"
       ? parser.codexExecutionSignal()
@@ -1576,6 +1583,9 @@ export async function reconcileObservableLeg(
         stderrSnapshot,
         REVIEWER_STDERR_TAIL_BYTES,
       );
+      if (record.reviewer === "codex") {
+        await observeStderrSnapshot(deps, stderrPath, stderrSnapshot, parser);
+      }
       const output = record.reviewer === "codex"
         ? await deps.readFile(codexOutputPath(base))
         : undefined;
@@ -2547,6 +2557,31 @@ async function readTextTail(
     offset += retained.byteLength;
   }
   return new TextDecoder().decode(bytes.subarray(0, offset - start));
+}
+
+// Scan the full stderr snapshot without retaining it. The ordinary stderr tail
+// remains the only operator-facing diagnostic, while this sticky classification
+// preserves an early sandbox-start failure for fail-fast retry semantics.
+async function observeStderrSnapshot(
+  deps: ObservableAdapterDeps,
+  path: string,
+  snapshotBytes: number,
+  parser: MachineEventParser,
+): Promise<void> {
+  let offset = 0;
+  while (offset < snapshotBytes) {
+    const bytes = await deps.readChunk(
+      path,
+      offset,
+      Math.min(MACHINE_EVENT_READ_CHUNK_BYTES, snapshotBytes - offset),
+    );
+    if (bytes.byteLength === 0) {
+      throw new WuxReviewError("codex observable stderr shrank during capture");
+    }
+    const retained = bytes.subarray(0, snapshotBytes - offset);
+    parser.observeStderr(retained);
+    offset += retained.byteLength;
+  }
 }
 
 async function drainMachineStream(

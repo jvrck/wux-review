@@ -169,6 +169,9 @@ export interface HeadlessRunOptions {
   // The retained stdout tail remains diagnostic/evidence plumbing only, so an
   // early lifecycle error cannot fall out of the fixed-size tail window.
   onStdoutChunk?: (bytes: Uint8Array) => void;
+  // Like stdout, stderr must be observed while it drains: a sandbox diagnostic
+  // at the start of a noisy stream must not fall out of its retained tail.
+  onStderrChunk?: (bytes: Uint8Array) => void;
   // Extra environment merged over the parent env (undefined inherits it
   // unchanged). Used to point the codex leg at an isolated CODEX_HOME.
   env?: Record<string, string>;
@@ -225,6 +228,7 @@ export const defaultHeadlessRun: HeadlessRun = async (cmd, opts) => {
       readAll(
         errReader,
         opts.stderrTailBytes ?? HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
+        opts.onStderrChunk,
       ),
       proc.exited,
     ]);
@@ -856,6 +860,7 @@ interface ExecLegInput {
   env?: Record<string, string>;
   cwd: string;
   onStdoutChunk?: (bytes: Uint8Array) => void;
+  onStderrChunk?: (bytes: Uint8Array) => void;
 }
 
 async function execLeg(
@@ -907,6 +912,7 @@ async function execLeg(
       : 0,
     stderrTailBytes: HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
     onStdoutChunk: input.onStdoutChunk,
+    onStderrChunk: input.onStderrChunk,
   });
 }
 
@@ -1207,6 +1213,9 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
                   directStreamObserved = true;
                   directParser.push(bytes);
                 },
+              onStderrChunk: directParser === undefined
+                ? undefined
+                : (bytes) => directParser.observeStderr(bytes),
             });
           } catch (error) {
             observableCleanupTransferred = opts.direct !== true

@@ -19,6 +19,10 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   Codex 0.162+ can start its sandbox. Codex approvals on affected hosts since
   that release should be treated as unreliable.
 
+- **Legacy observable Codex evidence.** Interrupted Codex legs recorded by an
+  older binary without an execution signal now reconcile as failed and must be
+  re-run.
+
 ### Upgrade notes
 
 - **Reconcile interrupted rounds before upgrading.** Reconcile an interrupted

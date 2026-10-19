@@ -25,6 +25,9 @@ import {
 } from "../../src/backends/observable-events";
 
 const REPORT = '```json\n{"findings":[]}\n```';
+const CODEX_COMPLETED_FIXTURE = await Bun.file(
+  new URL("../fixtures/codex-command-completed-0.163.0.json", import.meta.url),
+).text();
 const CODEX_COMMAND = JSON.stringify({
   type: "item.completed",
   item: { type: "command_execution", exit_code: 0, status: "completed" },
@@ -42,6 +45,7 @@ interface Opts {
   runResults?: Partial<HeadlessRunResult>[];
   stdout?: string;
   codexStdout?: string;
+  stderrChunks?: string[];
   writeThrows?: boolean;
   mkdirThrows?: boolean;
   // Codex `-o` last-message file content (the verdict source). Defaults to a
@@ -178,6 +182,11 @@ function harness(opts: Opts = {}) {
       };
       if (cmd[0] === "codex" && result.stdout !== undefined) {
         runOpts.onStdoutChunk?.(Buffer.from(result.stdout));
+      }
+      if (cmd[0] === "codex") {
+        for (const chunk of opts.stderrChunks ?? []) {
+          runOpts.onStderrChunk?.(Buffer.from(chunk));
+        }
       }
       return result;
     },
@@ -727,6 +736,67 @@ describe("createCodexHeadlessBackend", () => {
         direct,
       })).resolves.toBe(REPORT);
     }
+  });
+
+  test("recognizes a real 0.163.0 completed-command fixture when its output is oversized", async () => {
+    // This fixture preserves Codex 0.163.0's field order: aggregated_output
+    // precedes exit_code and status, which the bounded oversized classifier
+    // relies on to avoid retaining reviewed command output.
+    const codexStdout = CODEX_COMPLETED_FIXTURE.replace(
+      "<captured output removed>",
+      "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1),
+    );
+    for (const direct of [true, false]) {
+      const h = harness({ codexStdout });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `fixture-oversized-${direct}`,
+        direct,
+      })).resolves.toBe(REPORT);
+    }
+  });
+
+  test("fails closed on every unclassified oversized Codex event", async () => {
+    const command = CODEX_COMMAND;
+    for (const [index, event] of [
+      { type: "error", message: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1) },
+      { type: "turn.failed", error: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1) },
+      { type: "item.completed", item: { type: "agent_message", text: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1) } },
+    ].entries()) {
+      for (const direct of [true, false]) {
+        const h = harness({
+          codexRetries: 0,
+          codexStdout: `${command}\n${JSON.stringify(event)}`,
+        });
+        await expect(createCodexHeadlessBackend(h.deps)("P", {
+          sessionName: `oversized-${index}-${direct}`,
+          direct,
+        })).rejects.toThrow("unclassified oversized event");
+      }
+    }
+  });
+
+  test("detects sandbox diagnostics before the retained stderr tail, including split chunks", async () => {
+    const tail = "x".repeat(HEADLESS_DEFAULT_STDERR_TAIL_BYTES + 1);
+    const direct = harness({
+      codexRetries: 3,
+      runResult: { stderr: tail.slice(-HEADLESS_DEFAULT_STDERR_TAIL_BYTES) },
+      stderrChunks: ["Unable to spawn codex-linux-", `sandbox because: unavailable${tail}`],
+    });
+    await expect(createCodexHeadlessBackend(direct.deps)("P", {
+      sessionName: "sandbox-stderr-direct",
+      direct: true,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(direct.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+
+    const observable = harness({
+      codexRetries: 3,
+      observableCaptureErr: `Refusing to create helper binaries${tail}`,
+    });
+    await expect(createCodexHeadlessBackend(observable.deps)("P", {
+      sessionName: "sandbox-stderr-observable",
+      direct: false,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(observable.runs.filter(({ cmd }) => cmd.includes("run"))).toHaveLength(1);
   });
 
   test("fails an unlaunched sandbox command fast without retrying", async () => {

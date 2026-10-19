@@ -17,11 +17,12 @@ start. This location is outside the system temporary directory so Codex 0.162+
 can create its read-only sandbox helpers.
 
 Codex evidence is fail-closed in both direct and observable execution. An
-`error` or `turn.failed` machine event, a sandbox-start failure, or no completed
-`command_execution` item is a reviewer error rather than an approval, even if
-the final findings file is empty. Sandbox-unavailable failures are deterministic
-and do not consume retry attempts; other stream failures use the normal bounded
-retry policy.
+`error` or `turn.failed` machine event, a sandbox-start failure, an unclassified
+oversized event, or no completed `command_execution` item is a reviewer error
+rather than an approval, even if the final findings file is empty. Sandbox
+diagnostics are observed across the full stderr stream rather than only its
+retained tail. Sandbox-unavailable failures are deterministic and do not consume
+retry attempts; other stream failures use the normal bounded retry policy.
 
 ## Interrupted-round upgrade note
 

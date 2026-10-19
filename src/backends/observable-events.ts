@@ -47,6 +47,7 @@ export interface CodexExecutionSignal {
   sawError: boolean;
   sawTurnFailed: boolean;
   sandboxUnavailable: boolean;
+  unclassifiedOversized: boolean;
 }
 
 export function emptyCodexExecutionSignal(): CodexExecutionSignal {
@@ -55,6 +56,7 @@ export function emptyCodexExecutionSignal(): CodexExecutionSignal {
     sawError: false,
     sawTurnFailed: false,
     sandboxUnavailable: false,
+    unclassifiedOversized: false,
   };
 }
 
@@ -65,13 +67,18 @@ export function codexExecutionFailure(
   | "sandbox unavailable"
   | "turn failed"
   | "reported error"
+  | "unclassified oversized event"
   | "ran zero commands"
   | "missing execution signal"
   | undefined {
   if (sandboxUnavailable(stderr) || signal?.sandboxUnavailable === true) return "sandbox unavailable";
   if (signal === undefined) return "missing execution signal";
   if (signal.sawTurnFailed) return "turn failed";
+  // Codex can use top-level error events for a retriable stream reconnect. The
+  // literal #15 contract still makes every error fatal for this attempt, so it
+  // consumes the normal bounded retry rather than silently approving.
   if (signal.sawError) return "reported error";
+  if (signal.unclassifiedOversized) return "unclassified oversized event";
   if (signal.commandExecutions === 0) return "ran zero commands";
   return undefined;
 }
@@ -111,6 +118,7 @@ export class MachineEventParser {
   private claudeResultBytes = 0;
   private discardingOversizedClaudeResult = false;
   private readonly codexSignal = emptyCodexExecutionSignal();
+  private readonly stderrSandboxDetector = new SandboxUnavailableDetector();
 
   constructor(
     private readonly reviewer: ReviewerName,
@@ -176,6 +184,16 @@ export class MachineEventParser {
 
   codexExecutionSignal(): CodexExecutionSignal | undefined {
     return this.reviewer === "codex" ? { ...this.codexSignal } : undefined;
+  }
+
+  // Stderr is not reviewer-controlled JSONL, but it can still be larger than
+  // the retained diagnostic tail. Keep sandbox classification sticky while the
+  // caller drains it, including a diagnostic split across adjacent chunks.
+  observeStderr(bytes: Uint8Array): void {
+    if (this.reviewer !== "codex") return;
+    if (this.stderrSandboxDetector.observe(bytes)) {
+      this.codexSignal.sandboxUnavailable = true;
+    }
   }
 
   private consumeSegment(
@@ -344,12 +362,18 @@ export class MachineEventParser {
     if (this.reviewer !== "codex") return;
     // Oversized lines are intentionally never parsed as JSON or scanned for
     // diagnostics: their middle is reviewed content. Codex writes command
-    // output before `exit_code` and `status`, so these bounded envelope checks
-    // recognize only a completed command that demonstrably ran.
+    // output before `exit_code` and `status` (pinned by
+    // test/fixtures/codex-command-completed-0.163.0.json), so these bounded
+    // envelope checks recognize only a completed command that demonstrably ran.
     const head = new TextDecoder().decode(this.oversizedCodexHead);
     const tail = new TextDecoder().decode(this.oversizedCodexTail);
     if (isOversizedCompletedCommand(head, tail)) {
       this.codexSignal.commandExecutions++;
+    } else {
+      // An oversized record cannot be safely parsed or searched: its middle
+      // may be the reviewed diff. Only the positively recognized command
+      // envelope above may satisfy the execution requirement.
+      this.codexSignal.unclassifiedOversized = true;
     }
   }
 
@@ -436,6 +460,16 @@ export class MachineEventParser {
     this.claudeResultBytes = 0;
     this.discardingOversizedClaudeResult = false;
     return rejected;
+  }
+}
+
+class SandboxUnavailableDetector {
+  private carry = "";
+
+  observe(bytes: Uint8Array): boolean {
+    const text = this.carry + new TextDecoder().decode(bytes);
+    this.carry = text.slice(-256);
+    return sandboxUnavailable(text);
   }
 }
 

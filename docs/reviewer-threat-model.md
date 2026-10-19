@@ -26,7 +26,7 @@ configuration, not as project configuration.
 
 | Threat | Claude leg | Codex leg |
 |---|---|---|
-| Project instructions/settings | Runs in a fresh mode-0700 per-leg directory never the reviewed repository or a shared temp path; `--safe-mode` disables `CLAUDE.md` and project customizations. | Runs and uses `-C` in a fresh mode-0700 per-leg directory, never the reviewed repository or a shared temp path. This prevents discovery of project `AGENTS.md` and trusted-repository `.codex/config.toml`; the isolated home contains no global `AGENTS.md`, and `--ignore-rules` disables ambient exec-policy rules. |
+| Project instructions/settings | Runs in a fresh mode-0700 per-leg directory, never the reviewed repository or a shared temp path; `--safe-mode` disables `CLAUDE.md` and project customizations. | Runs and uses `-C` in a fresh mode-0700 per-leg directory, never the reviewed repository or a shared temp path. This prevents discovery of project `AGENTS.md` and trusted-repository `.codex/config.toml`; the isolated home contains no global `AGENTS.md`, and `--ignore-rules` disables ambient exec-policy rules. |
 | User settings and instructions | `--safe-mode` disables user customizations and `--settings {}` supplies no worker customization. | A fresh mode-0700 `CODEX_HOME` receives scalar allowlisted fields plus preserved provider tables from sanitized config layers, never the user's files wholesale. Instructions, project trust, permissions, and feature toggles are removed. |
 | Hooks, plugins, and skills | `--safe-mode` disables hooks/plugins and `--disable-slash-commands` disables skills. | `notify`, `hooks`, `plugins`, `marketplaces`, `skills`, `features`, and tool configuration are absent from the sanitized config and plugin/cache directories are not copied. |
 | Built-in tools and repository writes | `--tools ""` exposes no built-in tools. | `-s read-only` mechanically rejects filesystem mutation; the target repository is not the working root. |
@@ -41,12 +41,14 @@ mode changes only how that invocation is supervised and recorded.
 
 For Codex, the validated direct/observable evidence also records only the
 minimum execution signal: completed command count and whether an error,
-`turn.failed`, or sandbox-start failure occurred. A missing signal, zero
-completed commands, or either error state fails the leg closed even if Codex
-wrote an empty findings block. Sandbox-unavailable failures do not retry;
-generic turn and zero-command failures retain bounded retries because they can
-be transient. The raw JSONL remains durable evidence and is never echoed in an
-operator-facing error.
+`turn.failed`, sandbox-start failure, or unclassified oversized event occurred.
+A missing signal, zero completed commands, or any of those failure states fails
+the leg closed even if Codex wrote an empty findings block. Sandbox-unavailable
+failures do not retry; generic turn, error, oversized-event, and zero-command
+failures retain bounded retries because they can be transient. Top-level Codex
+`error` events can represent a retriable stream reconnect, but the literal
+issue contract makes each one fatal for that attempt. The raw JSONL remains
+durable evidence and is never echoed in an operator-facing error.
 
 ## Verification
 
