@@ -11,6 +11,8 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+## 2026.10.19
+
 ### Fixed
 
 - **Recorded end-session cleanup.** `--end-session` now stops the exact
