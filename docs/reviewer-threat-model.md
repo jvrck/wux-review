@@ -32,12 +32,23 @@ configuration, not as project configuration.
 | Built-in tools and repository writes | `--tools ""` exposes no built-in tools. | `-s read-only` mechanically rejects filesystem mutation; the target repository is not the working root. |
 | MCP and external mutation | `--strict-mcp-config` with no `--mcp-config` rejects ambient MCP definitions; no tools are exposed. | `mcp_servers` is removed and no plugin or custom-tool configuration is copied. This prevents ambient extensions from supplying external mutation tools; it is not a general network or provider boundary. |
 | Session persistence | `--no-session-persistence` prevents the print session being saved. | `--ephemeral` prevents session persistence; all remaining writable CLI state lives in the throwaway home. |
-| Authentication | `--bare` is deliberately not used because Claude 2.1.226 says it disables OAuth/keychain reads. Safe mode leaves OAuth/keychain and `ANTHROPIC_API_KEY` authentication working. | `auth.json` is copied, mode 0600, into the throwaway home. Built-in auth variables and the `env_key` declared by a preserved custom provider remain inherited for API/batch deployments. Creating, seeding, or sanitizing the isolated home fails closed and never falls back to the user's home. Auth-route detection is separate and advisory: when no credential route is detectable, the leg warns and proceeds so unauthenticated local/OSS providers work and Codex itself reports any genuine authentication error. |
+| Authentication | `--bare` is deliberately not used because Claude 2.1.226 says it disables OAuth/keychain reads. Safe mode leaves OAuth/keychain and `ANTHROPIC_API_KEY` authentication working. | `auth.json` is copied, mode 0600, into a throwaway mode-0700 home under `${XDG_STATE_HOME:-~/.local/state}/wux-review/codex-homes/` (relative XDG paths are ignored). The real current-user-owned root is verified before use; stale real homes older than 24 hours are pruned best-effort. This avoids Codex 0.162+ refusing sandbox helpers in system temp directories. Built-in auth variables and the `env_key` declared by a preserved custom provider remain inherited for API/batch deployments. Creating, seeding, or sanitizing the isolated home fails closed and never falls back to the user's home. Auth-route detection is separate and advisory: when no credential route is detectable, the leg warns and proceeds so unauthenticated local/OSS providers work and Codex itself reports any genuine authentication error. |
 | Provider/model selection | An explicit `--model` is unchanged; safe mode leaves model selection normal. | Codex 0.147.0's scalar routing/model controls survive the allowlist, including `model`, `review_model`, `model_provider`, context/compaction settings, reasoning effort/summary, verbosity, service tier, `chatgpt_base_url`, `openai_base_url`, and `oss_provider`. Provider tables, legacy profiles declared in `config.toml`, and separately sanitized `<name>.config.toml` profile layers—including symlink-managed layers whose resolved targets are bounded regular files—survive. Non-regular or oversized layers are skipped diagnostically during setup. Explicit `-m` remains unchanged. |
 
 Both direct and observable transports receive the same contained reviewer argv,
 private per-leg cwd, environment, prompt bytes, parsing, and verdict contract. Observable
 mode changes only how that invocation is supervised and recorded.
+
+For Codex, the validated direct/observable evidence also records only the
+minimum execution signal: completed command count and whether an error,
+`turn.failed`, sandbox-start failure, or unclassified oversized event occurred.
+A missing signal, zero completed commands, or any of those failure states fails
+the leg closed even if Codex wrote an empty findings block. Sandbox-unavailable
+failures do not retry; generic turn, error, oversized-event, and zero-command
+failures retain bounded retries because they can be transient. Top-level Codex
+`error` events can represent a retriable stream reconnect, but the literal
+issue contract makes each one fatal for that attempt. The raw JSONL remains
+durable evidence and is never echoed in an operator-facing error.
 
 ## Verification
 

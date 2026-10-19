@@ -21,9 +21,11 @@ import {
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_EVENT_READ_CHUNK_BYTES,
   MachineEventParser,
+  type CodexExecutionSignal,
   machineStreamChunkRecord,
   type ParsedMachineEvent,
 } from "./observable-events";
+import { codexHomeRoot } from "./codex-home";
 
 const WUX_COMMAND_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -111,6 +113,7 @@ export interface ObservableLegInput {
 
 export interface ObservableLegResult extends ObservableRunResult {
   structuredOutput?: string;
+  codexSignal?: CodexExecutionSignal;
 }
 
 export interface ReconcileObservableLegInput {
@@ -155,6 +158,16 @@ const resultSchema = z.object({
     timedOut: z.literal(false),
   }).strict(),
   output: z.string().optional(),
+  codexSignal: z.object({
+    commandExecutions: z.number().int().nonnegative(),
+    sawError: z.boolean(),
+    sawTurnFailed: z.boolean(),
+    sandboxUnavailable: z.boolean(),
+    // A pre-repair result lacks this field. It is safe to read as false because
+    // the rest of the signal is still present; a missing whole signal fails
+    // closed in codexExecutionFailure().
+    unclassifiedOversized: z.boolean().optional().default(false),
+  }).strict().optional(),
 }).strict();
 
 type ObservableResultFile = z.infer<typeof resultSchema>;
@@ -1111,7 +1124,13 @@ export async function runObservableLeg(
       stderrSnapshotBytes,
       REVIEWER_STDERR_TAIL_BYTES,
     );
+    if (input.reviewer === "codex") {
+      await observeStderrSnapshot(deps, stderrPath, stderrSnapshotBytes, parser);
+    }
     const output = input.outputPath === undefined ? undefined : await deps.readFile(input.outputPath);
+    const codexSignal = input.reviewer === "codex"
+      ? parser.codexExecutionSignal()
+      : undefined;
     await appendEvent(deps, evidencePath, {
       type: "review-leg-process-result",
       at: deps.now(),
@@ -1137,6 +1156,7 @@ export async function runObservableLeg(
       identity,
       process: { code: normalizedCode, stdout, stderr, timedOut: false },
       ...(output === undefined ? {} : { output }),
+      ...(codexSignal === undefined ? {} : { codexSignal }),
     };
     await publishResult(deps, resultPath, result, input.childName);
     await appendEvent(deps, evidencePath, {
@@ -1243,6 +1263,7 @@ export async function runObservableLeg(
       stderr: validated.process.stderr,
       timedOut: false,
       structuredOutput: validated.output,
+      codexSignal: validated.codexSignal,
     };
   } catch (caught) {
     let error = caught;
@@ -1562,6 +1583,9 @@ export async function reconcileObservableLeg(
         stderrSnapshot,
         REVIEWER_STDERR_TAIL_BYTES,
       );
+      if (record.reviewer === "codex") {
+        await observeStderrSnapshot(deps, stderrPath, stderrSnapshot, parser);
+      }
       const output = record.reviewer === "codex"
         ? await deps.readFile(codexOutputPath(base))
         : undefined;
@@ -1577,6 +1601,9 @@ export async function reconcileObservableLeg(
         identity,
         process: { code, stdout, stderr, timedOut: false },
         ...(output === undefined ? {} : { output }),
+        ...(record.reviewer === "codex"
+          ? { codexSignal: parser.codexExecutionSignal() }
+          : {}),
       };
       await appendEvent(deps, record.evidencePath, {
         type: "review-leg-process-result",
@@ -1665,6 +1692,7 @@ export async function reconcileObservableLeg(
       stderr: validated.process.stderr,
       timedOut: false,
       structuredOutput: validated.output,
+      codexSignal: validated.codexSignal,
     };
   } catch (error) {
     const state = error instanceof ObservableLifecycleError
@@ -2531,6 +2559,31 @@ async function readTextTail(
   return new TextDecoder().decode(bytes.subarray(0, offset - start));
 }
 
+// Scan the full stderr snapshot without retaining it. The ordinary stderr tail
+// remains the only operator-facing diagnostic, while this sticky classification
+// preserves an early sandbox-start failure for fail-fast retry semantics.
+async function observeStderrSnapshot(
+  deps: ObservableAdapterDeps,
+  path: string,
+  snapshotBytes: number,
+  parser: MachineEventParser,
+): Promise<void> {
+  let offset = 0;
+  while (offset < snapshotBytes) {
+    const bytes = await deps.readChunk(
+      path,
+      offset,
+      Math.min(MACHINE_EVENT_READ_CHUNK_BYTES, snapshotBytes - offset),
+    );
+    if (bytes.byteLength === 0) {
+      throw new WuxReviewError("codex observable stderr shrank during capture");
+    }
+    const retained = bytes.subarray(0, snapshotBytes - offset);
+    parser.observeStderr(retained);
+    offset += retained.byteLength;
+  }
+}
+
 async function drainMachineStream(
   deps: ObservableAdapterDeps,
   evidencePath: string,
@@ -2927,7 +2980,7 @@ function recoveryTransientPaths(
   );
 }
 
-function validateObservableCleanup(
+export function validateObservableCleanup(
   files: string[] | undefined,
   dir: string | undefined,
   adapterTmpDir: string,
@@ -2942,20 +2995,32 @@ function validateObservableCleanup(
       throw new WuxReviewError(`unsafe observable cleanup file: ${JSON.stringify(path)}`);
     }
   }
-  if (
-    dir !== undefined
-    && (
-      !isAbsolute(dir)
-      || dir === "/"
-      || !resolve(dir).startsWith(`${resolve(tmpdir())}${sep}`)
-      || (
-        !basename(dir).startsWith("wuxr-codex-home-")
-        && !basename(dir).startsWith("wuxr-reviewer-cwd-")
-      )
-    )
-  ) {
+  if (dir !== undefined && !isValidCodexCleanupDir(dir)) {
     throw new WuxReviewError(`unsafe observable cleanup directory: ${JSON.stringify(dir)}`);
   }
+}
+
+function isValidCodexCleanupDir(dir: string): boolean {
+  if (!isAbsolute(dir) || dir === "/") return false;
+  const root = resolve(codexHomeRoot());
+  const candidate = resolve(dir);
+  const name = basename(candidate);
+  if (dirname(candidate) === root && name.startsWith("wuxr-codex-home-")) {
+    return true;
+  }
+  const home = dirname(candidate);
+  return (
+    name.startsWith("wuxr-reviewer-cwd-")
+    && dirname(home) === root
+    && basename(home).startsWith("wuxr-codex-home-")
+  ) || (
+    // Claude still creates its independently-isolated cwd under tmpdir(). This
+    // is the only production non-Codex-home cleanup shape; accepting the exact
+    // direct child prefix preserves interruption cleanup without admitting a
+    // temp CODEX_HOME or arbitrary temporary path.
+    dirname(candidate) === resolve(tmpdir())
+    && name.startsWith("wuxr-reviewer-cwd-")
+  );
 }
 
 function shq(path: string): string {

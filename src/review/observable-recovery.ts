@@ -4,6 +4,7 @@ import {
   unwrapClaudeStream,
   type HeadlessRun,
 } from "../backends/headless";
+import { codexExecutionFailure } from "../backends/observable-events";
 import {
   defaultObservableDeps,
   discardPreparedObservableLeg,
@@ -390,7 +391,8 @@ function successfulCodexAttempt(
   attempts.forEach((attempt, index) => {
     const hasOutput = attempt.structuredOutput !== undefined
       && attempt.structuredOutput.trim() !== "";
-    if (attempt.code === 0 && hasOutput) {
+    const signalFailure = codexExecutionFailure(attempt.codexSignal, attempt.stderr);
+    if (attempt.code === 0 && hasOutput && signalFailure === undefined) {
       if (successful !== -1 || index !== attempts.length - 1) {
         throw new WuxReviewError(
           `observable round ${record.reviewId}: duplicate or replayed Codex result`,
@@ -398,8 +400,11 @@ function successfulCodexAttempt(
       }
       successful = index;
     } else if (index === attempts.length - 1) {
+      const detail = signalFailure === undefined
+        ? "has no successful completed result"
+        : `failed closed: ${signalFailure}`;
       throw new WuxReviewError(
-        `${record.evidence.codex[index]!.childName} observable reviewer leg has no successful completed result; evidence: ${record.evidence.codex[index]!.evidencePath}`,
+        `${record.evidence.codex[index]!.childName} observable reviewer leg ${detail}; evidence: ${record.evidence.codex[index]!.evidencePath}`,
       );
     }
   });

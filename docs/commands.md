@@ -207,6 +207,16 @@ and exit codes (`0` approve, `2` block). It marks the round and legs
 bootstrap files. Re-running an already reconciled round fails closed rather
 than replaying a verdict.
 
+### Upgrade note
+
+Before upgrading to a release that moves per-leg reviewer homes out of the
+system temp directory, reconcile any interrupted observable rounds with the
+old binary. The new binary deliberately refuses an old temporary cleanup
+directory rather than widening its cleanup guard; after upgrading, remove that
+old directory manually if the old binary cannot reconcile it. Reconcile with
+the same `XDG_STATE_HOME` environment that created the round, because recovery
+uses the current state-home location.
+
 If terminal cleanup itself fails, the terminal journal retains
 `cleanupPending` and blocks a replacement model launch. Re-run the same
 `reconcile` command to retry only exact-child/transient cleanup with zero model

@@ -11,6 +11,27 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **Fail-closed Codex reviews.** Codex legs now reject sandbox and turn errors,
+  or a run with no completed command, instead of approving empty findings. Their
+  private `CODEX_HOME` now lives in a mode-`0700` per-user state directory so
+  Codex 0.162+ can start its sandbox. Codex approvals on affected hosts since
+  that release should be treated as unreliable.
+
+- **Legacy observable Codex evidence.** Interrupted Codex legs recorded by an
+  older binary without an execution signal now reconcile as failed and must be
+  re-run.
+
+### Upgrade notes
+
+- **Reconcile interrupted rounds before upgrading.** Reconcile an interrupted
+  observable round with the old binary before installing this version. The new
+  cleanup guard rejects pre-upgrade temporary cleanup directories rather than
+  widening its authority; if the old binary cannot reconcile the round, remove
+  that old directory manually. Reconcile with the same `XDG_STATE_HOME` that
+  created the round.
+
 ### Security
 
 - **Dependency security refresh.** Updated the MCP SDK and its resolved

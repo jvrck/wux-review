@@ -10,10 +10,12 @@ import {
   ObservableLifecycleError,
   runObservableLeg,
   scheduleFileRemoval,
+  validateObservableCleanup,
   type ObservableAdapterDeps,
   type ObservableLegInput,
   type ObservableRunOptions,
 } from "../../src/backends/observable";
+import { codexHomeRoot } from "../../src/backends/codex-home";
 import { REVIEWER_STDERR_TAIL_BYTES } from "../../src/backends/capture-limits";
 import {
   MACHINE_EVENT_READ_CHUNK_BYTES,
@@ -25,6 +27,26 @@ const CLAUDE_STREAM = JSON.stringify({
   subtype: "success",
   is_error: false,
   result: REPORT,
+});
+const CODEX_HOME_ROOT = codexHomeRoot();
+
+test("validateObservableCleanup accepts only expected Codex home shapes", () => {
+  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
+  const cwd = join(home, "wuxr-reviewer-cwd-def");
+  expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
+  for (const unsafe of [
+    "/",
+    "relative",
+    join(CODEX_HOME_ROOT, "..", "outside"),
+    join(CODEX_HOME_ROOT, "wrong-name"),
+    join(tmpdir(), "wuxr-codex-home-old-location"),
+    join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
+  ]) {
+    expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(
+      "unsafe observable cleanup directory",
+    );
+  }
 });
 
 interface HarnessOptions {

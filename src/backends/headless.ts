@@ -1,8 +1,8 @@
 import { constants as fsConstants } from "node:fs";
 import type { Dirent } from "node:fs";
-import { chmod, copyFile, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
 import type { Backend, BackendOptions } from "../review/reviewers";
 import type { ReviewerName } from "../review/types";
@@ -13,9 +13,13 @@ import {
   type ObservableAdapterDeps,
 } from "./observable";
 import {
+  codexExecutionFailure,
+  MachineEventParser,
   isClaudeResultEvent,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
 } from "./observable-events";
+import { codexHomeRoot } from "./codex-home";
+import type { CodexExecutionSignal } from "./observable-events";
 
 // Headless reviewer legs: drive each model as a one-shot, non-interactive
 // subprocess that runs the review and *exits* — no `wux run` TUI, no instruction
@@ -161,6 +165,13 @@ export interface HeadlessRunOptions {
   // result window, while Codex's authoritative verdict comes from `-o`.
   stdoutTailBytes?: number;
   stderrTailBytes?: number;
+  // Direct Codex execution parses its complete machine stream incrementally.
+  // The retained stdout tail remains diagnostic/evidence plumbing only, so an
+  // early lifecycle error cannot fall out of the fixed-size tail window.
+  onStdoutChunk?: (bytes: Uint8Array) => void;
+  // Like stdout, stderr must be observed while it drains: a sandbox diagnostic
+  // at the start of a noisy stream must not fall out of its retained tail.
+  onStderrChunk?: (bytes: Uint8Array) => void;
   // Extra environment merged over the parent env (undefined inherits it
   // unchanged). Used to point the codex leg at an isolated CODEX_HOME.
   env?: Record<string, string>;
@@ -176,6 +187,7 @@ export interface HeadlessRunResult {
   // Candidate observable transport only: a validated output file (Codex `-o`)
   // read back through the atomic result.json contract.
   structuredOutput?: string;
+  codexSignal?: CodexExecutionSignal;
 }
 
 export type HeadlessRun = (cmd: string[], opts: HeadlessRunOptions) => Promise<HeadlessRunResult>;
@@ -211,10 +223,12 @@ export const defaultHeadlessRun: HeadlessRun = async (cmd, opts) => {
       readAll(
         outReader,
         opts.stdoutTailBytes ?? HEADLESS_DEFAULT_STDOUT_TAIL_BYTES,
+        opts.onStdoutChunk,
       ),
       readAll(
         errReader,
         opts.stderrTailBytes ?? HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
+        opts.onStderrChunk,
       ),
       proc.exited,
     ]);
@@ -240,6 +254,7 @@ export const defaultHeadlessRun: HeadlessRun = async (cmd, opts) => {
 async function readAll(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   tailLimitBytes: number,
+  onChunk?: (bytes: Uint8Array) => void,
 ): Promise<{
   text: string;
   truncated: boolean;
@@ -285,6 +300,7 @@ async function readAll(
       const { done, value } = await reader.read();
       if (done) break;
       if (value === undefined) continue;
+      onChunk?.(value);
       ensureCapacity(value.byteLength);
       if (value.byteLength >= tail.byteLength) {
         tail.set(value.subarray(value.byteLength - tail.byteLength));
@@ -655,7 +671,9 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
   const source = resolve(process.env.CODEX_HOME ?? join(homedir(), ".codex"));
   let createdHome: string | undefined;
   try {
-    createdHome = await mkdtemp(join(tmpdir(), "wuxr-codex-home-"));
+    const root = await secureCodexHomeRoot();
+    await pruneStaleCodexHomes(root);
+    createdHome = await mkdtemp(join(root, "wuxr-codex-home-"));
     await chmod(createdHome, 0o700);
   } catch (error) {
     if (createdHome !== undefined) {
@@ -748,6 +766,59 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
   }
 }
 
+export { codexHomeRoot } from "./codex-home";
+
+async function secureCodexHomeRoot(): Promise<string> {
+  const root = codexHomeRoot();
+  try {
+    const appRoot = dirname(root);
+    // XDG_STATE_HOME itself may legitimately be symlink-managed, but the
+    // wux-review component we create must not redirect private homes elsewhere.
+    await mkdir(appRoot, { recursive: true, mode: 0o700 });
+    await assertSecureStateDirectory(appRoot);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await assertSecureStateDirectory(root);
+    await chmod(appRoot, 0o700);
+    await chmod(root, 0o700);
+    return root;
+  } catch (error) {
+    throw new WuxReviewError(
+      `codex reviewer: cannot create secure per-leg CODEX_HOME root: ${errorDetail(error)}`,
+    );
+  }
+}
+
+async function assertSecureStateDirectory(path: string): Promise<void> {
+  const metadata = await lstat(path);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (
+    !metadata.isDirectory()
+    || metadata.isSymbolicLink()
+    || (uid !== undefined && metadata.uid !== uid)
+  ) {
+    throw new Error("state root is not a real directory owned by the current user");
+  }
+}
+
+async function pruneStaleCodexHomes(root: string): Promise<void> {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    await Promise.all(entries.map(async (entry) => {
+      if (!entry.name.startsWith("wuxr-codex-home-")) return;
+      const path = join(root, entry.name);
+      const metadata = await lstat(path);
+      // lstat is intentional: symlinks are never followed or removed here.
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.mtimeMs >= cutoff) return;
+      await rm(path, { recursive: true, force: true });
+    }));
+  } catch (error) {
+    // Pruning is hygiene only. A valid new isolated home is more important than
+    // deleting an old one, so failure remains visible but never blocks a leg.
+    process.stderr.write(`codex reviewer: stale-home pruning failed: ${oneLine(errorDetail(error))}\n`);
+  }
+}
+
 export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<ReviewerCwd> {
   let createdPath: string | undefined;
   try {
@@ -788,6 +859,8 @@ interface ExecLegInput {
   recordEvidence?: BackendOptions["recordEvidence"];
   env?: Record<string, string>;
   cwd: string;
+  onStdoutChunk?: (bytes: Uint8Array) => void;
+  onStderrChunk?: (bytes: Uint8Array) => void;
 }
 
 async function execLeg(
@@ -838,6 +911,8 @@ async function execLeg(
       ? HEADLESS_DEFAULT_STDOUT_TAIL_BYTES
       : 0,
     stderrTailBytes: HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
+    onStdoutChunk: input.onStdoutChunk,
+    onStderrChunk: input.onStderrChunk,
   });
 }
 
@@ -1110,6 +1185,10 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           // Clear any stale last-message (from a prior run reusing this session
           // name, or a prior attempt) so a failed attempt can't read an old verdict.
           await deps.rm(outPath);
+          const directParser = opts.direct === true
+            ? new MachineEventParser("codex")
+            : undefined;
+          let directStreamObserved = false;
           let result: HeadlessRunResult;
           try {
             result = await execLeg(deps, opts, {
@@ -1128,6 +1207,15 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               },
               env: home?.env,
               cwd: reviewerCwd.path,
+              onStdoutChunk: directParser === undefined
+                ? undefined
+                : (bytes) => {
+                  directStreamObserved = true;
+                  directParser.push(bytes);
+                },
+              onStderrChunk: directParser === undefined
+                ? undefined
+                : (bytes) => directParser.observeStderr(bytes),
             });
           } catch (error) {
             observableCleanupTransferred = opts.direct !== true
@@ -1146,6 +1234,21 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               ? new ObservableLifecycleError(message, "timed_out")
               : new WuxReviewError(message);
           }
+          const signal = opts.direct !== true
+            ? result.codexSignal
+            : codexSignalFromDirectStdout(
+              result.stdout,
+              directParser,
+              directStreamObserved,
+            );
+          const signalFailure = codexExecutionFailure(signal, result.stderr);
+          // Sandbox startup failures are deterministic on an affected host, so
+          // retrying burns the full Codex retry budget without creating a review.
+          // Other machine-stream failures (turn/error/zero commands) may be
+          // transient and therefore retain the established bounded retry policy.
+          if (signalFailure === "sandbox unavailable") {
+            throw codexFailureError("sandbox unavailable", opts.direct !== true);
+          }
           // In observable mode, result.json is the only verdict
           // source. The adapter has already copied and validated Codex's `-o`
           // output into `structuredOutput`; never reach around that contract to
@@ -1155,7 +1258,12 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               ? result.structuredOutput
               : await deps.readFile(outPath)
             : undefined;
-          if (result.code === 0 && last !== undefined && last.trim() !== "") {
+          if (
+            result.code === 0
+            && signalFailure === undefined
+            && last !== undefined
+            && last.trim() !== ""
+          ) {
             if (attempt > 0) {
               deps.warn(`codex reviewer: recovered on attempt ${attempt + 1}/${maxRetries + 1}`);
             }
@@ -1167,13 +1275,18 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
           const nonZero = result.code !== 0;
           // JSONL stdout can contain commands, tool payloads, model text, and
           // reasoning summaries. It is durable evidence, not a safe diagnostic.
-          const detail = nonZero ? oneLine(result.stderr) || `exit ${result.code}` : "produced no final message";
+          const detail = nonZero
+            ? oneLine(result.stderr) || `exit ${result.code}`
+            : signalFailure ?? "produced no final message";
           if (attempt >= maxRetries) {
             const suffix = attempt > 0 ? ` after ${attempt + 1} attempts` : "";
-            throw new WuxReviewError(
+            throw codexFailureError(
               nonZero
-                ? `codex reviewer: codex exec failed${suffix}: ${detail}`
-                : `codex reviewer: codex exec produced no final message${suffix}`,
+                ? `codex exec failed${suffix}: ${detail}`
+                : signalFailure === undefined
+                  ? `codex exec produced no final message${suffix}`
+                  : `codex reviewer: ${detail}${suffix}`,
+              opts.direct !== true,
             );
           }
           const backoffMs = deps.codexRetryBaseMs * 2 ** attempt;
@@ -1202,6 +1315,35 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
       }
     }
   };
+}
+
+function codexSignalFromDirectStdout(
+  stdout: string,
+  parser?: MachineEventParser,
+  streamObserved = false,
+): CodexExecutionSignal | undefined {
+  if (parser === undefined) {
+    const fallbackParser = new MachineEventParser("codex");
+    fallbackParser.push(new TextEncoder().encode(stdout));
+    fallbackParser.finish();
+    return fallbackParser.codexExecutionSignal();
+  }
+  // Injected test runners predate incremental observation and do not invoke the
+  // callback. Keep their bounded fixture seam while production observes the
+  // whole stream as it drains. Reusing the supplied parser preserves sticky
+  // stderr sandbox diagnostics observed before an empty stdout stream.
+  if (!streamObserved) {
+    parser.push(new TextEncoder().encode(stdout));
+  }
+  parser.finish();
+  return parser.codexExecutionSignal();
+}
+
+function codexFailureError(message: string, observable: boolean): WuxReviewError {
+  const prefixed = message.startsWith("codex reviewer:") ? message : `codex reviewer: ${message}`;
+  return observable
+    ? new ObservableLifecycleError(prefixed, "failed")
+    : new WuxReviewError(prefixed);
 }
 
 // Guard the session name before it is interpolated into temp-file paths. The

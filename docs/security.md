@@ -6,6 +6,33 @@ The reviewer execution boundary, auth-preserving containment decisions, and
 adversarial verification are documented in the
 [reviewer threat model](./reviewer-threat-model.md).
 
+## Codex reviewer state
+
+Each Codex review leg gets a fresh mode-`0700` `CODEX_HOME` under
+`${XDG_STATE_HOME:-~/.local/state}/wux-review/codex-homes/`; relative XDG state
+paths are ignored. The root is verified as a real, current-user-owned directory
+and is mode `0700`; homes are removed at normal completion and stale real home
+directories older than 24 hours are pruned best-effort at the next Codex-leg
+start. This location is outside the system temporary directory so Codex 0.162+
+can create its read-only sandbox helpers.
+
+Codex evidence is fail-closed in both direct and observable execution. An
+`error` or `turn.failed` machine event, a sandbox-start failure, an unclassified
+oversized event, or no completed `command_execution` item is a reviewer error
+rather than an approval, even if the final findings file is empty. Sandbox
+diagnostics are observed across the full stderr stream rather than only its
+retained tail. Sandbox-unavailable failures are deterministic and do not consume
+retry attempts; other stream failures use the normal bounded retry policy.
+
+## Interrupted-round upgrade note
+
+Before upgrading, reconcile interrupted observable rounds with the binary that
+created them. The upgraded binary intentionally rejects a pre-upgrade temporary
+cleanup directory rather than weakening its cleanup guard; remove that old
+directory manually if it cannot be reconciled first. Run reconciliation with
+the same `XDG_STATE_HOME` that the round used, because recovery resolves its
+state-home location from the current environment.
+
 ## What runs
 - **Reporting scan** (`dependency-scan`): verifies the text `bun.lock` (not
   `bun.lockb`), installs OSV-Scanner + Trivy, then scans the declared dependency

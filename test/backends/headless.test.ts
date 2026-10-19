@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, expect, spyOn, test } from "bun:test";
+import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createClaudeHeadlessBackend,
@@ -17,11 +17,22 @@ import {
   type HeadlessRunResult,
 } from "../../src/backends/headless";
 import { buildObservableWrapperScript } from "../../src/backends/observable";
+import { codexHomeRoot } from "../../src/backends/codex-home";
 import {
+  MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
+  MachineEventParser,
 } from "../../src/backends/observable-events";
 
 const REPORT = '```json\n{"findings":[]}\n```';
+const CODEX_COMPLETED_FIXTURE = await Bun.file(
+  new URL("../fixtures/codex-command-completed-0.163.0.json", import.meta.url),
+).text();
+const CODEX_COMMAND = JSON.stringify({
+  type: "item.completed",
+  item: { type: "command_execution", exit_code: 0, status: "completed" },
+});
+const CODEX_HOME_ROOT = codexHomeRoot();
 const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
@@ -33,6 +44,11 @@ interface Opts {
   // end. Lets attempt 1 fail and attempt 2 succeed.
   runResults?: Partial<HeadlessRunResult>[];
   stdout?: string;
+  codexStdout?: string;
+  // Production drains Codex stdout through the callback. Leave that callback
+  // off to exercise the injected-runner fallback seam explicitly.
+  invokeCodexStdoutCallback?: boolean;
+  stderrChunks?: string[];
   writeThrows?: boolean;
   mkdirThrows?: boolean;
   // Codex `-o` last-message file content (the verdict source). Defaults to a
@@ -86,6 +102,12 @@ function harness(opts: Opts = {}) {
   let cwdCleanupCalls = 0;
   let legRunIdx = 0;
   const liveRuns = new Set<string>();
+  const observableCaptureFor = (stem: string) => {
+    const argv = (files.get(`${stem}-observable-args`) ?? "").split("\0");
+    return argv[0] === "codex"
+      ? opts.codexStdout ?? CODEX_COMMAND
+      : opts.observableCapture ?? claudeEnvelope(REPORT);
+  };
   const deps: HeadlessBackendDeps = {
     run: async (cmd, runOpts) => {
       runs.push({ cmd, opts: runOpts });
@@ -151,14 +173,29 @@ function harness(opts: Opts = {}) {
       }
       const seq = opts.runResults?.[legRunIdx];
       legRunIdx++;
-      return {
+      const result = {
         code: 0,
-        stdout: opts.stdout ?? claudeEnvelope(REPORT),
+        stdout: cmd[0] === "codex"
+          ? opts.codexStdout ?? CODEX_COMMAND
+          : opts.stdout ?? claudeEnvelope(REPORT),
         stderr: "",
         timedOut: false,
         ...opts.runResult,
         ...(seq ?? {}),
       };
+      if (
+        cmd[0] === "codex"
+        && result.stdout !== undefined
+        && opts.invokeCodexStdoutCallback !== false
+      ) {
+        runOpts.onStdoutChunk?.(Buffer.from(result.stdout));
+      }
+      if (cmd[0] === "codex") {
+        for (const chunk of opts.stderrChunks ?? []) {
+          runOpts.onStderrChunk?.(Buffer.from(chunk));
+        }
+      }
+      return result;
     },
     mkdir: async (path) => {
       if (opts.mkdirThrows) throw new Error("mkdir failed");
@@ -175,7 +212,7 @@ function harness(opts: Opts = {}) {
       if (path.endsWith("-observable-ready")) {
         const stem = path.slice(0, -"-observable-ready".length);
         const childName = stem.slice(stem.lastIndexOf("/") + 1);
-        files.set(`${stem}-observable-stdout`, opts.observableCapture ?? claudeEnvelope(REPORT));
+        files.set(`${stem}-observable-stdout`, observableCaptureFor(stem));
         files.set(`${stem}-observable-stderr`, opts.observableCaptureErr ?? "");
         const attempt = Number(childName.match(/-a([0-9]+)$/)?.[1] ?? "1");
         files.set(
@@ -271,7 +308,7 @@ function harness(opts: Opts = {}) {
         if (path.endsWith("-observable-ready")) {
           const stem = path.slice(0, -"-observable-ready".length);
           const childName = stem.slice(stem.lastIndexOf("/") + 1);
-          files.set(`${stem}-observable-stdout`, opts.observableCapture ?? claudeEnvelope(REPORT));
+          files.set(`${stem}-observable-stdout`, observableCaptureFor(stem));
           files.set(`${stem}-observable-stderr`, opts.observableCaptureErr ?? "");
           const attempt = Number(childName.match(/-a([0-9]+)$/)?.[1] ?? "1");
           files.set(
@@ -641,6 +678,218 @@ describe("createCodexHeadlessBackend", () => {
     expect(empty.rms).toContain("/tmp/test/s-last.txt");
   });
 
+  test("fails closed on error, turn.failed, or zero command events despite an empty findings report", async () => {
+    for (const [index, [, codexStdout, expected]] of [
+      ["error", JSON.stringify({ type: "error", message: "provider failed" }), "reported error"],
+      ["turn.failed", JSON.stringify({ type: "turn.failed", error: "provider failed" }), "turn failed"],
+      ["zero commands", JSON.stringify({ type: "turn.completed" }), "ran zero commands"],
+    ].entries()) {
+      const h = harness({ codexStdout, codexRetries: 0 });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `codex-signal-${index}`,
+        direct: true,
+      })).rejects.toThrow(expected);
+    }
+  });
+
+  test("fails sandbox-unavailable signals fast without retrying", async () => {
+    const h = harness({
+      codexRetries: 3,
+      codexStdout: JSON.stringify({
+        type: "error",
+        message: "Unable to spawn codex-linux-sandbox because: unavailable",
+      }),
+    });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "sandbox-unavailable",
+      direct: true,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("keeps a sticky stderr sandbox diagnostic when production emits no stdout", async () => {
+    const filler = "x".repeat(HEADLESS_DEFAULT_STDERR_TAIL_BYTES + 1);
+    const h = harness({
+      codexRetries: 3,
+      codexStdout: "",
+      invokeCodexStdoutCallback: false,
+      runResult: { stdout: "", stderr: filler.slice(-HEADLESS_DEFAULT_STDERR_TAIL_BYTES) },
+      stderrChunks: ["Refusing to create helper binaries", filler],
+    });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "sandbox-no-stdout-direct",
+      direct: true,
+    })).rejects.toThrow("codex reviewer: sandbox unavailable");
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("parses returned stdout through the supplied parser when an injected runner skips callbacks", async () => {
+    const h = harness({ invokeCodexStdoutCallback: false });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "fallback-stdout-direct",
+      direct: true,
+    })).resolves.toBe(REPORT);
+  });
+
+  test("does not reparse returned stdout after the observed stream already supplied its command", async () => {
+    const h = harness();
+    const original = MachineEventParser.prototype.codexExecutionSignal;
+    let commandExecutions: number | undefined;
+    const signalSpy = spyOn(MachineEventParser.prototype, "codexExecutionSignal").mockImplementation(function (this: MachineEventParser) {
+      const signal = original.call(this);
+      commandExecutions = signal?.commandExecutions;
+      return signal;
+    });
+    try {
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: "observed-stdout-direct",
+        direct: true,
+      })).resolves.toBe(REPORT);
+    } finally {
+      signalSpy.mockRestore();
+    }
+    expect(commandExecutions).toBe(1);
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("does not mistake sandbox strings in a completed brief-read for diagnostics", async () => {
+    const codexStdout = JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        aggregated_output: "Refusing to create helper binaries; Unable to spawn codex-linux-sandbox",
+        exit_code: 0,
+        status: "completed",
+      },
+    });
+    for (const direct of [true, false]) {
+      const h = harness({ codexStdout });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `completed-brief-${direct}`,
+        direct,
+      })).resolves.toBe(REPORT);
+    }
+  });
+
+  test("accepts a completed oversized brief-read in direct and observable modes", async () => {
+    const codexStdout = JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        aggregated_output: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1),
+        exit_code: 0,
+        status: "completed",
+      },
+    });
+    for (const direct of [true, false]) {
+      const h = harness({ codexStdout });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `oversized-brief-${direct}`,
+        direct,
+      })).resolves.toBe(REPORT);
+    }
+  });
+
+  test("recognizes a real 0.163.0 completed-command fixture when its output is oversized", async () => {
+    // This fixture preserves Codex 0.163.0's field order: aggregated_output
+    // precedes exit_code and status, which the bounded oversized classifier
+    // relies on to avoid retaining reviewed command output.
+    const codexStdout = CODEX_COMPLETED_FIXTURE.replace(
+      "<captured output removed>",
+      "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1),
+    );
+    for (const direct of [true, false]) {
+      const h = harness({ codexStdout });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `fixture-oversized-${direct}`,
+        direct,
+      })).resolves.toBe(REPORT);
+    }
+  });
+
+  test("fails closed on every unclassified oversized Codex event", async () => {
+    const command = CODEX_COMMAND;
+    for (const [index, event] of [
+      { type: "error", message: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1) },
+      { type: "turn.failed", error: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1) },
+      { type: "item.completed", item: { type: "agent_message", text: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1) } },
+    ].entries()) {
+      for (const direct of [true, false]) {
+        const h = harness({
+          codexRetries: 0,
+          codexStdout: `${command}\n${JSON.stringify(event)}`,
+        });
+        await expect(createCodexHeadlessBackend(h.deps)("P", {
+          sessionName: `oversized-${index}-${direct}`,
+          direct,
+        })).rejects.toThrow("unclassified oversized event");
+      }
+    }
+  });
+
+  test("detects sandbox diagnostics before the retained stderr tail, including split chunks", async () => {
+    const tail = "x".repeat(HEADLESS_DEFAULT_STDERR_TAIL_BYTES + 1);
+    const direct = harness({
+      codexRetries: 3,
+      runResult: { stderr: tail.slice(-HEADLESS_DEFAULT_STDERR_TAIL_BYTES) },
+      stderrChunks: ["Unable to spawn codex-linux-", `sandbox because: unavailable${tail}`],
+    });
+    await expect(createCodexHeadlessBackend(direct.deps)("P", {
+      sessionName: "sandbox-stderr-direct",
+      direct: true,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(direct.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+
+    const observable = harness({
+      codexRetries: 3,
+      observableCaptureErr: `Refusing to create helper binaries${tail}`,
+    });
+    await expect(createCodexHeadlessBackend(observable.deps)("P", {
+      sessionName: "sandbox-stderr-observable",
+      direct: false,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(observable.runs.filter(({ cmd }) => cmd.includes("run"))).toHaveLength(1);
+  });
+
+  test("fails an unlaunched sandbox command fast without retrying", async () => {
+    const h = harness({
+      codexRetries: 3,
+      codexStdout: JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          aggregated_output: "Unable to spawn codex-linux-sandbox",
+          status: "failed",
+        },
+      }),
+    });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "failed-sandbox-command",
+      direct: true,
+    })).rejects.toThrow("sandbox unavailable");
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("observable Codex legs also fail closed on error or zero-command signals", async () => {
+    const error = harness({
+      codexRetries: 0,
+      codexStdout: JSON.stringify({ type: "error", message: "failed" }),
+    });
+    await expect(createCodexHeadlessBackend(error.deps)("P", {
+      sessionName: "observable-error",
+      direct: false,
+    })).rejects.toThrow("reported error");
+
+    const empty = harness({
+      codexRetries: 0,
+      codexStdout: JSON.stringify({ type: "turn.completed" }),
+    });
+    await expect(createCodexHeadlessBackend(empty.deps)("P", {
+      sessionName: "observable-empty",
+      direct: false,
+    })).rejects.toThrow("ran zero commands");
+  });
+
   test("a setup failure before exec rejects, never runs codex, and still cleans up", async () => {
     const w = harness({ writeThrows: true });
     await expect(createCodexHeadlessBackend(w.deps)("P", { sessionName: "s", direct: true })).rejects.toThrow("write failed");
@@ -879,7 +1128,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      observableCleanupPath: join(tmpdir(), "wuxr-codex-home-test"),
+      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-test"),
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
@@ -911,7 +1160,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      observableCleanupPath: join(tmpdir(), "wuxr-codex-home-test"),
+      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-test"),
       abortOnStop: abort,
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
@@ -1500,6 +1749,22 @@ describe("defaultHeadlessRun (real process)", () => {
     expect(r.stdoutTailStartsAtLineBoundary).toBe(false);
   });
 
+  test("streams early machine events to a direct signal observer beyond the stdout tail", async () => {
+    const parser = new MachineEventParser("codex");
+    const earlyError = `${JSON.stringify({ type: "error", message: "early failure" })}\n`;
+    const r = await defaultHeadlessRun(
+      [process.execPath, "-e", `process.stdout.write(${JSON.stringify(earlyError)} + "x".repeat(300_000))`],
+      {
+        timeoutMs: 5000,
+        stdoutTailBytes: 32,
+        onStdoutChunk: (bytes) => parser.push(bytes),
+      },
+    );
+    parser.finish();
+    expect(r.stdout).not.toContain("early failure");
+    expect(parser.codexExecutionSignal()?.sawError).toBe(true);
+  });
+
   test("detects a real truncated tail that starts exactly after a newline", async () => {
     const event = claudeEnvelope(REPORT);
     const retainedPadding = HEADLESS_DEFAULT_STDOUT_TAIL_BYTES
@@ -1682,7 +1947,12 @@ describe("per-leg timeout env knobs (#99, #107)", () => {
     const overrides = {
       run: async (_cmd: string[], o: HeadlessRunOptions): Promise<HeadlessRunResult> => {
         box.timeoutMs = o.timeoutMs;
-        return { code: 0, stdout: claudeEnvelope(REPORT), stderr: "", timedOut: false };
+        return {
+          code: 0,
+          stdout: kind === "codex" ? CODEX_COMMAND : claudeEnvelope(REPORT),
+          stderr: "",
+          timedOut: false,
+        };
       },
       mkdir: async () => {},
       writeFile: async () => {},
@@ -1988,11 +2258,14 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
       "CODEX_API_KEY",
       "CODEX_ACCESS_TOKEN",
       "CODEX_HOME",
+      "XDG_STATE_HOME",
       ...extraVars,
     ];
     const saved = new Map(authVars.map((v) => [v, process.env[v]]));
+    const state = await mkdtemp(join(tmpdir(), "wuxr-test-state-"));
     for (const v of authVars) delete process.env[v];
     if (src !== undefined) process.env.CODEX_HOME = src;
+    process.env.XDG_STATE_HOME = state;
     try {
       await body();
     } finally {
@@ -2000,6 +2273,7 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
         if (val === undefined) delete process.env[v];
         else process.env[v] = val;
       }
+      await rm(state, { recursive: true, force: true });
     }
   }
 
@@ -2063,6 +2337,115 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
       expect(await Bun.file(join(src, "auth.json")).text()).toBe('{"token":"secret"}');
     });
     await rm(src, { recursive: true, force: true });
+  });
+
+  test("uses an absolute XDG state root with mode-0700 root and home", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const home = await prepareIsolatedCodexHome();
+      const root = join(state, "wux-review", "codex-homes");
+      expect(home.env.CODEX_HOME).toStartWith(`${root}/wuxr-codex-home-`);
+      expect((await stat(root)).mode & 0o777).toBe(0o700);
+      expect((await stat(home.env.CODEX_HOME!)).mode & 0o777).toBe(0o700);
+      await home.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores relative XDG state homes and permits a symlinked XDG state root", async () => {
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = "relative-state";
+    try {
+      expect(codexHomeRoot()).toBe(
+        join(homedir(), ".local", "state", "wux-review", "codex-homes"),
+      );
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+    }
+
+    const stateTarget = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
+    const stateLink = `${stateTarget}-link`;
+    await symlink(stateTarget, stateLink);
+    process.env.XDG_STATE_HOME = stateLink;
+    try {
+      const home = await prepareIsolatedCodexHome();
+      await home.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(stateLink, { force: true });
+      await rm(stateTarget, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a symlinked wux-review state component", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const target = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
+    const prior = process.env.XDG_STATE_HOME;
+    await symlink(target, join(state, "wux-review"));
+    process.env.XDG_STATE_HOME = state;
+    try {
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a symlinked codex-homes root", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const target = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
+    const prior = process.env.XDG_STATE_HOME;
+    await mkdir(join(state, "wux-review"), { recursive: true });
+    await symlink(target, join(state, "wux-review", "codex-homes"));
+    process.env.XDG_STATE_HOME = state;
+    try {
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  test("prunes only old real own-prefix homes", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const oldHome = join(root, "wuxr-codex-home-old");
+    const youngHome = join(root, "wuxr-codex-home-young");
+    const other = join(root, "other-old");
+    const outside = await mkdtemp(join(tmpdir(), "wuxr-outside-"));
+    const link = join(root, "wuxr-codex-home-link");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(other)]);
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await Promise.all([utimes(oldHome, old, old), utimes(other, old, old)]);
+      await symlink(outside, link);
+      const home = await prepareIsolatedCodexHome();
+      await home.cleanup();
+      expect(await Bun.file(oldHome).exists()).toBe(false);
+      expect((await lstat(youngHome)).isDirectory()).toBe(true);
+      expect((await lstat(other)).isDirectory()).toBe(true);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      expect((await lstat(outside)).isDirectory()).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   test("isolates via an auth env var even with no auth.json to copy (CI / batch hosts)", async () => {

@@ -174,6 +174,8 @@ else
 fi
 jq -nc '{type:"thread.started",thread_id:"REAL_WUX_SMOKE"}'
 jq -nc '{type:"turn.started"}'
+jq -nc '{type:"item.started",item:{id:"item_1",type:"command_execution",command:"cat review-brief"}}'
+jq -nc '{type:"item.completed",item:{id:"item_1",type:"command_execution",command:"cat review-brief",aggregated_output:"",exit_code:0,status:"completed"}}'
 sleep "${WUXR_REAL_SMOKE_DELAY_SECONDS:?}"
 jq -nc '{type:"turn.completed"}'
 printf '```json\n{"findings":%s}\n```\n' "$findings" > "$out"

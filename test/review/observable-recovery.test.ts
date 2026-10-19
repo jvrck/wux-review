@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { HeadlessRunOptions } from "../../src/backends/headless";
+import { codexHomeRoot } from "../../src/backends/codex-home";
 import { reconcileReview } from "../../src/review/observable-recovery";
 import type {
   ObservableRoundRecord,
@@ -17,6 +19,7 @@ const CLAUDE_STREAM = JSON.stringify({
   is_error: false,
   result: REPORT,
 });
+const CODEX_HOME_ROOT = codexHomeRoot();
 
 function recoveryHarness(options: {
   taintReviewer?: "claude" | "codex";
@@ -227,7 +230,10 @@ function recoveryHarness(options: {
       `${record.transientBase}-observable-stdout`,
       record.reviewer === "claude"
         ? CLAUDE_STREAM
-        : `${JSON.stringify({ type: "turn.completed" })}\n`,
+        : `${JSON.stringify({
+            type: "item.completed",
+            item: { type: "command_execution", exit_code: 0, status: "completed" },
+          })}\n`,
     );
     if (record.reviewer === "codex") {
       files.set(`${record.transientBase}-observable-output`, REPORT);
@@ -464,6 +470,63 @@ function recoveryHarness(options: {
 }
 
 describe("observable parent recovery", () => {
+  test("refuses legacy Codex result evidence without the execution signal", async () => {
+    const h = recoveryHarness();
+    const evidence = h.evidence.codex;
+    h.files.set(evidence.resultPath, `${JSON.stringify({
+      version: 1,
+      identity: {
+        id: evidence.resultId,
+        reviewId: h.reviewId,
+        round: 1,
+        reviewer: "codex",
+        childName: evidence.childName,
+        attempt: evidence.attempt,
+        promptSha256: evidence.promptSha256,
+      },
+      process: { code: 0, stdout: "", stderr: "", timedOut: false },
+      output: REPORT,
+    })}\n`);
+    await expect(reconcileReview(h.reviewId, {
+      roundStore: h.roundStore,
+      sessionStore: h.sessionStore,
+      run: h.run,
+      observable: h.observable,
+    })).rejects.toThrow("missing execution signal");
+  });
+
+  test("refuses a recorded unclassified oversized Codex event", async () => {
+    const h = recoveryHarness();
+    const evidence = h.evidence.codex;
+    h.files.set(evidence.resultPath, `${JSON.stringify({
+      version: 1,
+      identity: {
+        id: evidence.resultId,
+        reviewId: h.reviewId,
+        round: 1,
+        reviewer: "codex",
+        childName: evidence.childName,
+        attempt: evidence.attempt,
+        promptSha256: evidence.promptSha256,
+      },
+      process: { code: 0, stdout: "", stderr: "", timedOut: false },
+      output: REPORT,
+      codexSignal: {
+        commandExecutions: 1,
+        sawError: false,
+        sawTurnFailed: false,
+        sandboxUnavailable: false,
+        unclassifiedOversized: true,
+      },
+    })}\n`);
+    await expect(reconcileReview(h.reviewId, {
+      roundStore: h.roundStore,
+      sessionStore: h.sessionStore,
+      run: h.run,
+      observable: h.observable,
+    })).rejects.toThrow("unclassified oversized event");
+  });
+
   test("reconciles two complete untainted legs with zero model calls and cleans transients", async () => {
     const h = recoveryHarness();
     let lockHeld = false;
@@ -725,7 +788,7 @@ describe("observable parent recovery", () => {
       `${h.evidence.codex.transientBase}-prompt.md`,
     ];
     const preparedOutput = "/tmp/recovery/prepared-codex-output.txt";
-    const preparedHome = `${tmpdir()}/wuxr-codex-home-prepared-recovery`;
+    const preparedHome = join(CODEX_HOME_ROOT, "wuxr-codex-home-prepared-recovery");
     h.files.set(
       `${h.evidence.codex.transientBase}-observable-prepared-cleanup.json`,
       `${JSON.stringify({
@@ -986,7 +1049,7 @@ describe("observable parent recovery", () => {
     const h = recoveryHarness();
     const promptPath = "/tmp/recovery/recover-review-r1-codex-prompt.md";
     const outputPath = "/tmp/recovery/recover-review-r1-codex-last.txt";
-    const cleanupDir = `${tmpdir()}/wuxr-codex-home-recovery`;
+    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-recovery");
     Object.assign(h.evidence.codex, {
       cleanupFiles: [promptPath, outputPath],
       cleanupDir,
@@ -1030,7 +1093,7 @@ describe("observable parent recovery", () => {
     });
     const promptPath = "/tmp/recovery/shared-codex-prompt.md";
     const outputPath = "/tmp/recovery/shared-codex-last.txt";
-    const cleanupDir = `${tmpdir()}/wuxr-codex-home-shared-recovery`;
+    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-shared-recovery");
     for (const entry of [h.evidence.codex, h.codexRetry!]) {
       Object.assign(entry, {
         cleanupFiles: [promptPath, outputPath],

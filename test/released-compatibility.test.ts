@@ -30,6 +30,10 @@ const BLOCK =
   '```json\n{"findings":[{"lens":"correctness","file":"src/x.ts","line":7,' +
   '"severity":"must-fix","finding":"off by one","repro":"bun test test/x.test.ts"}]}\n```';
 const AT = "2026-07-28T00:00:00Z";
+const CODEX_COMMAND = JSON.stringify({
+  type: "item.completed",
+  item: { type: "command_execution", exit_code: 0, status: "completed" },
+});
 
 function transportBackend(kind: "claude" | "codex", report: string): ReturnType<typeof createClaudeHeadlessBackend> {
   const files = new Map<string, string>();
@@ -95,7 +99,7 @@ function transportBackend(kind: "claude" | "codex", report: string): ReturnType<
     if (cmd[0] === "codex") {
       const outPath = cmd[cmd.indexOf("-o") + 1]!;
       files.set(outPath, report);
-      return { code: 0, stdout: "", stderr: "", timedOut: false };
+      return { code: 0, stdout: CODEX_COMMAND, stderr: "", timedOut: false };
     }
     throw new Error(`unexpected command: ${cmd.join(" ")}`);
   };
@@ -103,7 +107,7 @@ function transportBackend(kind: "claude" | "codex", report: string): ReturnType<
     files.set(path, content);
     if (path.endsWith("-observable-ready")) {
       const stem = path.slice(0, -"-observable-ready".length);
-      files.set(`${stem}-observable-stdout`, kind === "claude" ? claudeEnvelope : "");
+      files.set(`${stem}-observable-stdout`, kind === "claude" ? claudeEnvelope : CODEX_COMMAND);
       files.set(`${stem}-observable-stderr`, "");
       files.set(`${stem}-observable-done`, "0");
       const args = [...files.entries()].find(([key]) => key === `${stem}-observable-args`)?.[1]?.split("\0") ?? [];
