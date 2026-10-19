@@ -5,6 +5,7 @@ import {
   observableSessionName,
   runReviewers,
   sessionName,
+  validateObservableChildName,
   type Backend,
 } from "../../src/review/reviewers";
 
@@ -13,6 +14,26 @@ const APPROVE = report([]);
 const BLOCK = report([{ lens: "correctness", file: "x.ts", line: 1, severity: "must-fix", finding: "bug" }]);
 
 const DIFF = "diff --git a/x.ts b/x.ts\n+changed\n";
+
+describe("validateObservableChildName", () => {
+  test("accepts exact configured-prefix names with and without a retry suffix", () => {
+    expect(validateObservableChildName("wuxr", "abc", "wuxr-abc-r1-xdeadbeef-claude"))
+      .toEqual({ reviewer: "claude", attempt: 1 });
+    expect(validateObservableChildName("wuxr", "abc", "wuxr-abc-r12-xcafebabe-codex-a3"))
+      .toEqual({ reviewer: "codex", attempt: 3 });
+  });
+
+  test("rejects cross-session lookalikes, wrong prefixes, bad execution ids, and bad reviewers", () => {
+    for (const childName of [
+      "wuxr-x-abc-r1-xdeadbeef-claude",
+      "other-abc-r1-xdeadbeef-claude",
+      "wuxr-abc-r1-xdeadbee-claude",
+      "wuxr-abc-r1-xdeadbeef-other",
+    ]) {
+      expect(() => validateObservableChildName("wuxr", "abc", childName)).toThrow("invalid observable child name");
+    }
+  });
+});
 
 describe("runReviewers", () => {
   test("feeds both reviewers the SAME prompt (diff + full lens set)", async () => {

@@ -19,6 +19,7 @@ import {
   type ObservableRoundRecord,
   type ObservableRoundStoreDeps,
 } from "../../src/review/observable-lifecycle";
+import { WuxReviewError } from "../../src/runtime/errors";
 
 function harness(initial: Record<string, string> = {}) {
   const files = new Map(Object.entries(initial));
@@ -122,6 +123,59 @@ describe("observable round recovery store", () => {
     const malformed = harness({ "/rounds/round-test.json.tmp": "{}\n" });
     await expect(malformed.store.load("round-test")).resolves.toBeUndefined();
     expect(malformed.files.has("/rounds/round-test.json.tmp")).toBe(false);
+  });
+
+  test("inspectForEndSession uses the committed journal and reports it", async () => {
+    const current = record();
+    const h = harness({ "/rounds/round-test.json": JSON.stringify(current) });
+    await expect(h.store.inspectForEndSession!("round-test")).resolves.toEqual({
+      record: current,
+      temporaryRecord: undefined,
+      files: ["/rounds/round-test.json"],
+    });
+  });
+
+  test("inspectForEndSession exposes a valid temporary journal alongside the committed journal", async () => {
+    const current = record();
+    const temporary = { ...record(), executionId: "exec2" };
+    const h = harness({
+      "/rounds/round-test.json": JSON.stringify(current),
+      "/rounds/round-test.json.tmp": JSON.stringify(temporary),
+    });
+    await expect(h.store.inspectForEndSession!("round-test")).resolves.toEqual({
+      record: current,
+      temporaryRecord: temporary,
+      files: ["/rounds/round-test.json", "/rounds/round-test.json.tmp"],
+    });
+  });
+
+  test("inspectForEndSession ignores a truncated temporary journal but reports it", async () => {
+    const current = record();
+    const h = harness({
+      "/rounds/round-test.json": JSON.stringify(current),
+      "/rounds/round-test.json.tmp": "{",
+    });
+    await expect(h.store.inspectForEndSession!("round-test")).resolves.toEqual({
+      record: current,
+      temporaryRecord: undefined,
+      files: ["/rounds/round-test.json", "/rounds/round-test.json.tmp"],
+    });
+  });
+
+  test("inspectForEndSession exposes a valid temporary-only journal", async () => {
+    const temporary = record();
+    const h = harness({ "/rounds/round-test.json.tmp": JSON.stringify(temporary) });
+    await expect(h.store.inspectForEndSession!("round-test")).resolves.toEqual({
+      record: undefined,
+      temporaryRecord: temporary,
+      files: ["/rounds/round-test.json.tmp"],
+    });
+  });
+
+  test("inspectForEndSession rejects an invalid committed journal without removing it", async () => {
+    const h = harness({ "/rounds/round-test.json": "{" });
+    await expect(h.store.inspectForEndSession!("round-test")).rejects.toBeInstanceOf(WuxReviewError);
+    expect(h.files.has("/rounds/round-test.json")).toBe(true);
   });
 
   test("promotes a valid newer tmp journal over an older main journal", async () => {

@@ -11,7 +11,14 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+## 2026.10.19
+
 ### Fixed
+
+- **Recorded end-session cleanup.** `--end-session` now stops the exact
+  observable reviewer children recorded for its session (including Codex retry
+  attempts), reports stopped/already-gone/failed children, and clears the
+  session state plus observable round journal only after successful cleanup.
 
 - **Fail-closed Codex reviews.** Codex legs now reject sandbox and turn errors,
   or a run with no completed command, instead of approving empty findings. Their

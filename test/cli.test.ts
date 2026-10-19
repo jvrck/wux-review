@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CliDeps, parseReviewArgs, runCli } from "../src/cli";
+import { EndSessionFailure } from "../src/review/session";
 import type { Finding, ReviewerName, ReviewResult } from "../src/review/types";
 
 const ENTRY = new URL("../src/index.ts", import.meta.url).pathname;
@@ -441,6 +442,48 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       expect(ended).toBe("my-sess");
       expect(reviewed).toBe(false);
       expect(stdout).toContain("ended session my-sess");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--end-session --json emits its per-child cleanup report", async () => {
+    const dir = gitRepo();
+    try {
+      const { code, stdout } = await callCli(["--session", "my-sess", "--end-session", "--json"], dir, {
+        endSession: async () => ({
+          sessionId: "my-sess",
+          children: [{ name: "wuxr-my-sess-r1-xdeadbeef-claude", status: "stopped" as const }],
+          removed: ["/rounds/my-sess.json"],
+        }),
+      });
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout)).toEqual({
+        sessionId: "my-sess",
+        children: [{ name: "wuxr-my-sess-r1-xdeadbeef-claude", status: "stopped" }],
+        removed: ["/rounds/my-sess.json"],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--end-session --json emits its cleanup report before a stop failure", async () => {
+    const dir = gitRepo();
+    const report = {
+      sessionId: "my-sess",
+      children: [{ name: "wuxr-my-sess-r1-xdeadbeef-claude", status: "failed: permission denied" as const }],
+      removed: [],
+    };
+    try {
+      const { code, stdout, stderr } = await callCli(["--session", "my-sess", "--end-session", "--json"], dir, {
+        endSession: async () => {
+          throw new EndSessionFailure("--end-session: cleanup failed", report);
+        },
+      });
+      expect(code).toBe(1);
+      expect(JSON.parse(stdout)).toEqual(report);
+      expect(stderr).toContain("cleanup failed");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -1,5 +1,6 @@
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
+import { WuxReviewError } from "../runtime/errors";
 import { validateSessionId } from "./reviewers";
 import type { SessionState } from "./types";
 
@@ -103,6 +104,7 @@ const stateSchema = z.object({
 export interface SessionStore {
   load(sessionId: string): Promise<SessionState | undefined>;
   loadForCompare?: (sessionId: string) => Promise<SessionLoadSnapshot>;
+  inspectForEndSession?: (sessionId: string) => Promise<SessionEndSessionSnapshot>;
   save(sessionId: string, state: SessionState): Promise<void>;
   clear(sessionId: string): Promise<void>;
 }
@@ -114,6 +116,12 @@ export interface SessionLoadSnapshot {
   // replace after a context-free direct review. I/O failures are not: they may
   // hide a valid concurrent/newer state and remain fail-closed for writes.
   corrupt?: true;
+}
+
+export interface SessionEndSessionSnapshot {
+  state: SessionState | undefined;
+  temporaryState?: SessionState;
+  files: string[];
 }
 
 // FS boundary, injected so the store is unit-testable without touching disk and
@@ -161,6 +169,38 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     },
     async loadForCompare(sessionId) {
       return loadSnapshot(deps, sessionId);
+    },
+    async inspectForEndSession(sessionId) {
+      const path = statePath(deps, sessionId);
+      const temporaryPath = `${path}.tmp`;
+      let raw: string | undefined;
+      let temporaryRaw: string | undefined;
+      let temporaryReadFailed = false;
+      try {
+        raw = await deps.readFile(path);
+      } catch {
+        throw new WuxReviewError(`--end-session: could not read session state ${path}`);
+      }
+      try {
+        temporaryRaw = await deps.readFile(temporaryPath);
+      } catch {
+        temporaryReadFailed = true;
+      }
+      const files = [
+        ...(raw === undefined ? [] : [path]),
+        ...(temporaryRaw === undefined && !temporaryReadFailed ? [] : [temporaryPath]),
+      ];
+      const state = raw === undefined ? undefined : parseSessionState(raw);
+      if (raw !== undefined && state === undefined) {
+        throw new WuxReviewError(`--end-session: invalid session state at ${path}`);
+      }
+      // A temporary file was never atomically committed. It can contribute a
+      // child launched just before a crash, but it can never invalidate the
+      // committed state or block cleanup when it is truncated.
+      const temporaryState = temporaryRaw === undefined
+        ? undefined
+        : parseSessionState(temporaryRaw);
+      return { state, temporaryState, files };
     },
     async save(sessionId, state) {
       const path = statePath(deps, sessionId);
