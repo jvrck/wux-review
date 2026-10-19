@@ -120,6 +120,7 @@ export interface SessionLoadSnapshot {
 
 export interface SessionEndSessionSnapshot {
   state: SessionState | undefined;
+  temporaryState?: SessionState;
   files: string[];
 }
 
@@ -174,33 +175,32 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
       const temporaryPath = `${path}.tmp`;
       let raw: string | undefined;
       let temporaryRaw: string | undefined;
+      let temporaryReadFailed = false;
       try {
-        [raw, temporaryRaw] = await Promise.all([
-          deps.readFile(path),
-          deps.readFile(temporaryPath),
-        ]);
+        raw = await deps.readFile(path);
       } catch {
         throw new WuxReviewError(`--end-session: could not read session state ${path}`);
       }
+      try {
+        temporaryRaw = await deps.readFile(temporaryPath);
+      } catch {
+        temporaryReadFailed = true;
+      }
       const files = [
         ...(raw === undefined ? [] : [path]),
-        ...(temporaryRaw === undefined ? [] : [temporaryPath]),
+        ...(temporaryRaw === undefined && !temporaryReadFailed ? [] : [temporaryPath]),
       ];
-      if (raw === undefined && temporaryRaw === undefined) {
-        return { state: undefined, files };
+      const state = raw === undefined ? undefined : parseSessionState(raw);
+      if (raw !== undefined && state === undefined) {
+        throw new WuxReviewError(`--end-session: invalid session state at ${path}`);
       }
-      const state = temporaryRaw === undefined
-        ? raw === undefined ? undefined : parseSessionState(raw)
+      // A temporary file was never atomically committed. It can contribute a
+      // child launched just before a crash, but it can never invalidate the
+      // committed state or block cleanup when it is truncated.
+      const temporaryState = temporaryRaw === undefined
+        ? undefined
         : parseSessionState(temporaryRaw);
-      const invalidPath = temporaryRaw !== undefined && parseSessionState(temporaryRaw) === undefined
-        ? temporaryPath
-        : raw !== undefined && parseSessionState(raw) === undefined
-          ? path
-          : undefined;
-      if (invalidPath !== undefined || state === undefined) {
-        throw new WuxReviewError(`--end-session: invalid session state at ${invalidPath ?? path}`);
-      }
-      return { state, files };
+      return { state, temporaryState, files };
     },
     async save(sessionId, state) {
       const path = statePath(deps, sessionId);

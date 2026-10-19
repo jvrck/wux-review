@@ -1,15 +1,20 @@
 import { WUX_ALREADY_GONE_PATTERNS } from "../backends/observable";
 import { run as defaultRun, type Run, type RunResult } from "../runtime/exec";
-import { WuxReviewError } from "../runtime/errors";
+import { errorDetail, WuxReviewError } from "../runtime/errors";
 import {
   acquireObservableRecoveryLock,
   defaultObservableRoundStore,
   type ObservableRoundRecord,
   type ObservableRoundStore,
 } from "./observable-lifecycle";
-import { sessionName, validateObservableChildName, validateSessionId } from "./reviewers";
+import {
+  sessionName,
+  validateObservableChildName,
+  validateObservablePrefix,
+  validateSessionId,
+} from "./reviewers";
 import { defaultSessionStore, type SessionStore } from "./session-state";
-import type { SessionState } from "./types";
+import type { ReviewerName, SessionState } from "./types";
 
 export type EndSessionChildStatus = "stopped" | "already-gone" | `failed: ${string}`;
 
@@ -28,6 +33,13 @@ export interface EndSessionReport {
 export interface EndSessionDeps {
   roundStore?: ObservableRoundStore;
   acquireLock?: (reviewId: string) => Promise<() => Promise<void>>;
+  observablePrefix?: string;
+}
+
+export class EndSessionFailure extends WuxReviewError {
+  constructor(message: string, readonly report: EndSessionReport) {
+    super(message);
+  }
 }
 
 // Stop only runs proven by this session's durable state. This never lists Wux
@@ -41,6 +53,9 @@ export async function endSession(
 ): Promise<EndSessionReport> {
   validateSessionId(sessionId);
   const roundStore = deps.roundStore ?? defaultObservableRoundStore;
+  const observablePrefix = validateObservablePrefix(
+    deps.observablePrefix ?? process.env.WUX_REVIEW_OBSERVABLE_PREFIX ?? "wuxr",
+  );
   const releaseLock = await (deps.acquireLock ?? acquireObservableRecoveryLock)(sessionId);
   try {
     const stateSnapshot = store.inspectForEndSession === undefined
@@ -49,42 +64,53 @@ export async function endSession(
     const roundSnapshot = roundStore.inspectForEndSession === undefined
       ? { record: await roundStore.load(sessionId), files: [] }
       : await roundStore.inspectForEndSession(sessionId);
-    const state = stateSnapshot.state;
-    const journal = roundSnapshot.record;
-    if (state === undefined && journal === undefined) {
-      return { sessionId, children: [], removed: [], nothingRecorded: true };
+    const states = [stateSnapshot.state, stateSnapshot.temporaryState]
+      .filter((state): state is SessionState => state !== undefined);
+    const journals = [roundSnapshot.record, roundSnapshot.temporaryRecord]
+      .filter((record): record is ObservableRoundRecord => record !== undefined);
+    const removed = [...stateSnapshot.files, ...roundSnapshot.files];
+    if (states.length === 0 && journals.length === 0) {
+      if (removed.length > 0) {
+        await store.clear(sessionId);
+        await roundStore.clear(sessionId);
+      }
+      return { sessionId, children: [], removed, nothingRecorded: true };
     }
-    if (journal !== undefined && (!isTerminalRound(journal) || journal.cleanupPending === true)) {
+    const activeJournal = journals.find(
+      (journal) => !isTerminalRound(journal) || journal.cleanupPending === true,
+    );
+    if (activeJournal !== undefined) {
       throw new WuxReviewError(
-        `--end-session: observable round ${sessionId} is ${journal.state}; run \`wux-review reconcile ${sessionId}\` first`,
+        `--end-session: observable round ${sessionId} is ${activeJournal.state}; run \`wux-review reconcile ${sessionId}\` first`,
       );
     }
 
     const reports: EndSessionChildReport[] = [];
-    for (const { name, legacy } of recordedNames(sessionId, state, journal)) {
+    for (const candidate of recordedNames(sessionId, states, journals)) {
       try {
-        validateRecordedName(sessionId, name, legacy);
+        validateRecordedName(sessionId, observablePrefix, candidate);
       } catch (error) {
-        reports.push({ name, status: `failed: refused ${(error as Error).message}` });
+        reports.push({ name: candidate.name, status: `failed: refused ${errorDetail(error)}` });
         continue;
       }
       try {
-        const result = await run(["wux", "--local", "stop", name, "--yes"]);
+        const result = await run(["wux", "--local", "stop", candidate.name, "--yes"]);
         if (result.code === 0) {
-          reports.push({ name, status: "stopped" });
-        } else if (isAlreadyGone(result)) {
-          reports.push({ name, status: "already-gone" });
+          reports.push({ name: candidate.name, status: "stopped" });
+        } else if (isAlreadyGone(result, candidate.legacy)) {
+          reports.push({ name: candidate.name, status: "already-gone" });
         } else {
-          reports.push({ name, status: `failed: ${stopFailure(result)}` });
+          reports.push({ name: candidate.name, status: `failed: ${stopFailure(result)}` });
         }
       } catch (error) {
-        reports.push({ name, status: `failed: ${(error as Error).message}` });
+        reports.push({ name: candidate.name, status: `failed: ${errorDetail(error)}` });
       }
     }
     const failures = reports.filter((report) => report.status.startsWith("failed:"));
     if (failures.length > 0) {
-      throw new WuxReviewError(
+      throw new EndSessionFailure(
         `--end-session: cleanup failed; ${reports.map((report) => `${report.name}: ${report.status}`).join("; ")}`,
+        { sessionId, children: reports, removed: [] },
       );
     }
 
@@ -95,7 +121,7 @@ export async function endSession(
     return {
       sessionId,
       children: reports,
-      removed: [...stateSnapshot.files, ...roundSnapshot.files],
+      removed,
     };
   } finally {
     await releaseLock();
@@ -104,27 +130,52 @@ export async function endSession(
 
 function recordedNames(
   sessionId: string,
-  state: SessionState | undefined,
-  journal: ObservableRoundRecord | undefined,
-): Array<{ name: string; legacy: boolean }> {
-  const names = new Map<string, boolean>();
-  const add = (name: string, legacy = false) => {
-    names.set(name, names.get(name) === true || legacy);
+  states: SessionState[],
+  journals: ObservableRoundRecord[],
+): RecordedName[] {
+  const names = new Map<string, RecordedName>();
+  const add = (name: string, context: RecordedNameContext = {}) => {
+    const existing = names.get(name);
+    if (existing === undefined) {
+      names.set(name, { name, legacy: context.legacy === true, contexts: [context] });
+    } else {
+      existing.legacy ||= context.legacy === true;
+      existing.contexts.push(context);
+    }
   };
-  for (const round of state?.children ?? []) {
-    for (const child of [...round.claude, ...round.codex]) add(child.childName);
+  for (const state of states) {
+    for (const round of state.children ?? []) {
+      for (const child of round.claude) {
+        add(child.childName, { reviewer: "claude", attempt: child.attempt });
+      }
+      for (const child of round.codex) {
+        add(child.childName, { reviewer: "codex", attempt: child.attempt });
+      }
+    }
   }
-  if (journal !== undefined) {
-    add(journal.expected.claudeChildName);
-    add(journal.expected.codexChildName);
-    for (const child of journal.prepared?.claude ?? []) add(child);
-    for (const child of journal.prepared?.codex ?? []) add(child);
+  for (const journal of journals) {
+    add(journal.expected.claudeChildName, { reviewer: "claude" });
+    add(journal.expected.codexChildName, { reviewer: "codex" });
+    for (const child of journal.prepared?.claude ?? []) add(child, { reviewer: "claude" });
+    for (const child of journal.prepared?.codex ?? []) add(child, { reviewer: "codex" });
   }
-  if (state !== undefined && ranDirectHeadlessRound(state)) {
-    add(sessionName(sessionId, "claude"), true);
-    add(sessionName(sessionId, "codex"), true);
+  if (states.some(ranDirectHeadlessRound)) {
+    add(sessionName(sessionId, "claude"), { legacy: true });
+    add(sessionName(sessionId, "codex"), { legacy: true });
   }
-  return [...names].map(([name, legacy]) => ({ name, legacy }));
+  return [...names.values()];
+}
+
+interface RecordedNameContext {
+  reviewer?: ReviewerName;
+  attempt?: number;
+  legacy?: boolean;
+}
+
+interface RecordedName {
+  name: string;
+  legacy: boolean;
+  contexts: RecordedNameContext[];
 }
 
 function ranDirectHeadlessRound(state: SessionState): boolean {
@@ -135,9 +186,24 @@ function ranDirectHeadlessRound(state: SessionState): boolean {
   return false;
 }
 
-function validateRecordedName(sessionId: string, name: string, legacy: boolean): void {
-  if (legacy && (name === sessionName(sessionId, "claude") || name === sessionName(sessionId, "codex"))) return;
-  validateObservableChildName(sessionId, name);
+function validateRecordedName(
+  sessionId: string,
+  observablePrefix: string,
+  candidate: RecordedName,
+): void {
+  if (
+    candidate.legacy
+    && (candidate.name === sessionName(sessionId, "claude") || candidate.name === sessionName(sessionId, "codex"))
+  ) return;
+  const parsed = validateObservableChildName(observablePrefix, sessionId, candidate.name);
+  for (const context of candidate.contexts) {
+    if (context.reviewer !== undefined && parsed.reviewer !== context.reviewer) {
+      throw new WuxReviewError(`reviewer does not match recorded ${context.reviewer} child`);
+    }
+    if (context.attempt !== undefined && parsed.attempt !== context.attempt) {
+      throw new WuxReviewError(`attempt does not match recorded attempt ${context.attempt}`);
+    }
+  }
 }
 
 function isTerminalRound(record: ObservableRoundRecord): boolean {
@@ -150,8 +216,17 @@ function stopFailure(result: RunResult): string {
 
 // Keep cleanup's definition of a vanished child aligned with the observable
 // backend's exact-child cleanup behavior.
-export function isAlreadyGone(result: RunResult): boolean {
+const LEGACY_ALREADY_GONE_PATTERNS = [
+  /^tmux session is not running(?:\s|$)/i,
+  /^no such session(?:\s|$)/i,
+  /^unknown session(?:\s|$)/i,
+];
+
+export function isAlreadyGone(result: RunResult, legacy = false): boolean {
+  const patterns = legacy
+    ? [...WUX_ALREADY_GONE_PATTERNS, ...LEGACY_ALREADY_GONE_PATTERNS]
+    : WUX_ALREADY_GONE_PATTERNS;
   return [result.stdout, result.stderr]
     .map((message) => message.trim().replace(/^wux:\s*/i, ""))
-    .some((message) => WUX_ALREADY_GONE_PATTERNS.some((pattern) => pattern.test(message)));
+    .some((message) => patterns.some((pattern) => pattern.test(message)));
 }

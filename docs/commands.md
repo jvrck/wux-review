@@ -48,10 +48,14 @@ child names recorded for that session, including recorded Codex retry attempts.
 It also consults the observable round journal so an interrupted round can still
 be cleaned up before its session state was written. It never lists or glob-matches
 live Wux runs. A direct-headless legacy name is considered only when the
-persisted state proves a direct round ran.
+persisted state proves a direct round ran. Run cleanup with the same
+`WUX_REVIEW_OBSERVABLE_PREFIX` (or programmatic observable-prefix setting) that
+was used for the rounds; a name with another prefix is refused rather than
+stopped.
 
 The command reports every recorded child as `stopped`, `already-gone`, or
-`failed`, and `--json` emits the same report as an object. It removes the
+`failed`, and `--json` emits the same report as an object, including on a stop
+failure. It removes the
 session state and the round journal (including their atomic temporary files)
 only after every child is stopped or confirmed gone. A stop failure leaves both
 records in place for retry. If the journal describes an in-progress round, use

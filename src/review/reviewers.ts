@@ -394,22 +394,24 @@ export function validateObservableExecutionId(id: string): string {
 // capability to stop an arbitrary Wux run. Parse the complete recorded identity
 // and prove that it belongs to the requested session before using it as argv.
 export function validateObservableChildName(
+  prefix: string,
   sessionId: string,
   childName: string,
 ): { reviewer: ReviewerName; attempt: number } {
+  const safePrefix = validateObservablePrefix(prefix);
   const safeSessionId = validateSessionId(sessionId);
+  const escapedPrefix = safePrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedSessionId = safeSessionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(
-    `^(.+)-${escapedSessionId}-r([1-9][0-9]*)-x([0-9a-f]{8})-(claude|codex)(?:-a([1-9][0-9]*))?$`,
+    `^${escapedPrefix}-${escapedSessionId}-r([1-9][0-9]*)-x([0-9a-f]{8})-(claude|codex)(?:-a([1-9][0-9]*))?$`,
   ).exec(childName);
   if (match === null) {
     throw new WuxReviewError(`invalid observable child name for session ${safeSessionId}: ${JSON.stringify(childName)}`);
   }
-  validateObservablePrefix(match[1]!);
-  validateObservableExecutionId(match[3]!);
+  validateObservableExecutionId(match[2]!);
   return {
-    reviewer: match[4]! as ReviewerName,
-    attempt: match[5] === undefined ? 1 : Number(match[5]),
+    reviewer: match[3]! as ReviewerName,
+    attempt: match[4] === undefined ? 1 : Number(match[4]),
   };
 }
 

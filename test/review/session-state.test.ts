@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createSessionStore, type SessionStoreDeps } from "../../src/review/session-state";
+import { WuxReviewError } from "../../src/runtime/errors";
 import type { SessionState } from "../../src/review/types";
 
 // An in-memory FS boundary so the store is exercised without touching disk.
@@ -62,6 +63,56 @@ describe("session store", () => {
     deps.files.set("/state/sess-1.json.tmp", "{");
     await expect(createSessionStore(deps).load("sess-1")).resolves.toEqual(state);
     expect(deps.files.has("/state/sess-1.json.tmp")).toBe(false);
+  });
+
+  test("inspectForEndSession uses the committed state and reports it", async () => {
+    const deps = memDeps();
+    deps.files.set("/state/sess-1.json", JSON.stringify(state));
+    await expect(createSessionStore(deps).inspectForEndSession!("sess-1")).resolves.toEqual({
+      state,
+      temporaryState: undefined,
+      files: ["/state/sess-1.json"],
+    });
+  });
+
+  test("inspectForEndSession unions a valid temporary state without preferring it", async () => {
+    const deps = memDeps();
+    const temporaryState = { ...state, round: 3 };
+    deps.files.set("/state/sess-1.json", JSON.stringify(state));
+    deps.files.set("/state/sess-1.json.tmp", JSON.stringify(temporaryState));
+    await expect(createSessionStore(deps).inspectForEndSession!("sess-1")).resolves.toEqual({
+      state,
+      temporaryState,
+      files: ["/state/sess-1.json", "/state/sess-1.json.tmp"],
+    });
+  });
+
+  test("inspectForEndSession ignores a truncated temporary state but reports it", async () => {
+    const deps = memDeps();
+    deps.files.set("/state/sess-1.json", JSON.stringify(state));
+    deps.files.set("/state/sess-1.json.tmp", "{");
+    await expect(createSessionStore(deps).inspectForEndSession!("sess-1")).resolves.toEqual({
+      state,
+      temporaryState: undefined,
+      files: ["/state/sess-1.json", "/state/sess-1.json.tmp"],
+    });
+  });
+
+  test("inspectForEndSession reports a valid temporary-only state", async () => {
+    const deps = memDeps();
+    deps.files.set("/state/sess-1.json.tmp", JSON.stringify(state));
+    await expect(createSessionStore(deps).inspectForEndSession!("sess-1")).resolves.toEqual({
+      state: undefined,
+      temporaryState: state,
+      files: ["/state/sess-1.json.tmp"],
+    });
+  });
+
+  test("inspectForEndSession rejects an invalid committed state without removing it", async () => {
+    const deps = memDeps();
+    deps.files.set("/state/sess-1.json", "{");
+    await expect(createSessionStore(deps).inspectForEndSession!("sess-1")).rejects.toBeInstanceOf(WuxReviewError);
+    expect(deps.files.has("/state/sess-1.json")).toBe(true);
   });
 
   test("load of a missing session → undefined", async () => {

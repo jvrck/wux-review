@@ -15,6 +15,18 @@ function child(reviewer: "claude" | "codex", attempt = 1): string {
   return `wuxr-abc-r1-xdeadbeef-${reviewer}${attempt === 1 ? "" : `-a${attempt}`}`;
 }
 
+function evidence(reviewer: "claude" | "codex", childName: string, attempt = 1) {
+  return {
+    reviewer,
+    childName,
+    attempt,
+    evidencePath: "/e",
+    resultPath: "/r",
+    resultId: "id",
+    promptSha256: "a".repeat(64),
+  };
+}
+
 function state(children: SessionState["children"] = []): SessionState {
   return {
     version: 1,
@@ -99,6 +111,19 @@ describe("endSession", () => {
     expect(calls).toEqual(["wuxr-abc-claude", "wuxr-abc-codex"]);
   });
 
+  test("accepts legacy already-gone wording while cleaning a direct round", async () => {
+    const sessions = store(state());
+    const rounds = roundStore();
+    const report = await endSession("abc", async () => ({
+      code: 1,
+      stdout: "",
+      stderr: "wux: tmux session is not running",
+    }), sessions, { roundStore: rounds, acquireLock: lock });
+    expect(report.children.map((entry) => entry.status)).toEqual(["already-gone", "already-gone"]);
+    expect(sessions.cleared).toEqual(["abc"]);
+    expect(rounds.cleared).toEqual(["abc"]);
+  });
+
   test("uses journal expected and prepared names after interruption before session save", async () => {
     const calls: string[] = [];
     const current = journal({ prepared: { claude: [child("claude")], codex: [child("codex"), child("codex", 2)] } });
@@ -161,6 +186,29 @@ describe("endSession", () => {
     expect(calls).toEqual([]);
   });
 
+  test("removes a temporary-only unreadable residue without attempting a stop", async () => {
+    const sessions = store();
+    sessions.inspectForEndSession = async () => ({
+      state: undefined,
+      files: ["/sessions/abc.json.tmp"],
+    });
+    const rounds = roundStore();
+    let calls = 0;
+    const report = await endSession("abc", async () => { calls++; return ok; }, sessions, {
+      roundStore: rounds,
+      acquireLock: lock,
+    });
+    expect(report).toEqual({
+      sessionId: "abc",
+      children: [],
+      removed: ["/sessions/abc.json.tmp"],
+      nothingRecorded: true,
+    });
+    expect(calls).toBe(0);
+    expect(sessions.cleared).toEqual(["abc"]);
+    expect(rounds.cleared).toEqual(["abc"]);
+  });
+
   test("refuses a tampered child name without stopping it", async () => {
     const sessions = store(state([{
       round: 1,
@@ -173,6 +221,67 @@ describe("endSession", () => {
     })).rejects.toThrow("unrelated-run");
     expect(calls).toBe(0);
     expect(sessions.cleared).toEqual([]);
+  });
+
+  test("refuses a cross-session lookalike and a wrong observable prefix", async () => {
+    const sessions = store(state([{
+      round: 1,
+      claude: [evidence("claude", "wuxr-x-abc-r1-xdeadbeef-claude")],
+      codex: [evidence("codex", "other-abc-r1-xdeadbeef-codex")],
+    }]));
+    let calls = 0;
+    await expect(endSession("abc", async () => { calls++; return ok; }, sessions, {
+      roundStore: roundStore(), acquireLock: lock,
+    })).rejects.toThrow("failed: refused");
+    expect(calls).toBe(0);
+  });
+
+  test("uses an explicitly configured observable prefix", async () => {
+    const name = "custom-abc-r1-xdeadbeef-claude";
+    const sessions = store(state([{
+      round: 1,
+      claude: [evidence("claude", name)],
+      codex: [],
+    }]));
+    const calls: string[] = [];
+    await endSession("abc", async (cmd) => { calls.push(cmd[3]!); return ok; }, sessions, {
+      roundStore: roundStore(), acquireLock: lock, observablePrefix: "custom",
+    });
+    expect(calls).toEqual([name]);
+  });
+
+  test("uses the observable-prefix environment fallback", async () => {
+    const previous = process.env.WUX_REVIEW_OBSERVABLE_PREFIX;
+    process.env.WUX_REVIEW_OBSERVABLE_PREFIX = "envprefix";
+    try {
+      const name = "envprefix-abc-r1-xdeadbeef-codex";
+      const sessions = store(state([{
+        round: 1,
+        claude: [],
+        codex: [evidence("codex", name)],
+      }]));
+      const calls: string[] = [];
+      await endSession("abc", async (cmd) => { calls.push(cmd[3]!); return ok; }, sessions, {
+        roundStore: roundStore(), acquireLock: lock,
+      });
+      expect(calls).toEqual([name]);
+    } finally {
+      if (previous === undefined) delete process.env.WUX_REVIEW_OBSERVABLE_PREFIX;
+      else process.env.WUX_REVIEW_OBSERVABLE_PREFIX = previous;
+    }
+  });
+
+  test("refuses evidence whose parsed reviewer or retry attempt disagrees with its record", async () => {
+    const sessions = store(state([{
+      round: 1,
+      claude: [evidence("claude", child("codex"))],
+      codex: [evidence("codex", child("codex", 2), 3)],
+    }]));
+    let calls = 0;
+    await expect(endSession("abc", async () => { calls++; return ok; }, sessions, {
+      roundStore: roundStore(), acquireLock: lock,
+    })).rejects.toThrow("reviewer does not match");
+    expect(calls).toBe(0);
   });
 
   test("refuses a legacy-shaped name injected into observable child evidence", async () => {
@@ -223,11 +332,26 @@ describe("endSession", () => {
   });
 });
 
-test("isAlreadyGone accepts exactly the observable backend's missing-run patterns", () => {
-  for (const pattern of WUX_ALREADY_GONE_PATTERNS) {
-    const source = pattern.source.replace(/^\^/, "").replace(/\(\?:[^)]*\)/g, "stopped").replace(/\$$/, "");
-    // Concrete known wording covers the shared list's externally observable contract.
-    expect(isAlreadyGone({ code: 1, stdout: "", stderr: source.includes("not found") ? "run not found: x" : "run is stopped" })).toBe(true);
+test("isAlreadyGone accepts every observable backend missing-run pattern and rejects unrelated failures", () => {
+  const observableCases = [
+    "run not found: child",
+    "run is not running",
+    "run is stopped",
+    "tmux session is not running",
+    "no such session child",
+    "unknown session child",
+  ];
+  expect(observableCases).toHaveLength(WUX_ALREADY_GONE_PATTERNS.length);
+  for (const stderr of observableCases) {
+    expect(isAlreadyGone({ code: 1, stdout: "", stderr: `wux: ${stderr}` })).toBe(true);
   }
-  expect(isAlreadyGone({ code: 127, stdout: "", stderr: "wux: command not found" })).toBe(false);
+  for (const stderr of ["wux: command not found", "wux: no such file or directory", "wux: exit 1"]) {
+    expect(isAlreadyGone({ code: 1, stdout: "", stderr })).toBe(false);
+  }
+});
+
+test("legacy cleanup retains its anchored already-gone wording", () => {
+  for (const stderr of ["tmux session is not running", "no such session child", "unknown session child"]) {
+    expect(isAlreadyGone({ code: 1, stdout: "", stderr }, true)).toBe(true);
+  }
 });

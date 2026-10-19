@@ -13,7 +13,11 @@ import { parseRefutations } from "./review/refutation";
 import { exitCodeFor, renderHuman, renderJson } from "./review/render";
 import { skillsCommand } from "./skills/show";
 import type { DualReviewResult, RunReviewersOptions } from "./review/reviewers";
-import { endSession as defaultEndSession, type EndSessionReport } from "./review/session";
+import {
+  EndSessionFailure,
+  endSession as defaultEndSession,
+  type EndSessionReport,
+} from "./review/session";
 import type { Refutation } from "./review/types";
 import { WuxReviewError } from "./runtime/errors";
 import { VERSION } from "./version";
@@ -171,7 +175,15 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
         "--end-session only stops the session; it cannot be combined with review arguments (<ref>, --pr, --lenses, --post-to-pr, --refutations)",
       );
     }
-    const report = await (deps.endSession ?? defaultEndSession)(opts.session);
+    let report: EndSessionReport | void;
+    try {
+      report = await (deps.endSession ?? defaultEndSession)(opts.session);
+    } catch (error) {
+      if (opts.json && error instanceof EndSessionFailure) {
+        process.stdout.write(`${JSON.stringify(error.report)}\n`);
+      }
+      throw error;
+    }
     if (report === undefined) {
       process.stdout.write(`wux-review: ended session ${opts.session}\n`);
     } else if (opts.json) {
@@ -250,10 +262,11 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
 }
 
 function renderEndSessionReport(report: EndSessionReport): string {
+  const lines: string[] = [];
   if (report.nothingRecorded === true) {
-    return `wux-review: session ${report.sessionId}: nothing recorded to stop\n`;
+    lines.push(`wux-review: session ${report.sessionId}: nothing recorded to stop`);
   }
-  const lines = report.children.map((child) => `wux-review: ${child.name}: ${child.status}`);
+  lines.push(...report.children.map((child) => `wux-review: ${child.name}: ${child.status}`));
   for (const file of report.removed) lines.push(`wux-review: removed ${file}`);
   return `${lines.join("\n")}\n`;
 }
