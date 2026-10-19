@@ -446,6 +446,27 @@ describe("review pipeline (in-process, injected reviewers)", () => {
     }
   });
 
+  test("--end-session --json emits its per-child cleanup report", async () => {
+    const dir = gitRepo();
+    try {
+      const { code, stdout } = await callCli(["--session", "my-sess", "--end-session", "--json"], dir, {
+        endSession: async () => ({
+          sessionId: "my-sess",
+          children: [{ name: "wuxr-my-sess-r1-xdeadbeef-claude", status: "stopped" as const }],
+          removed: ["/rounds/my-sess.json"],
+        }),
+      });
+      expect(code).toBe(0);
+      expect(JSON.parse(stdout)).toEqual({
+        sessionId: "my-sess",
+        children: [{ name: "wuxr-my-sess-r1-xdeadbeef-claude", status: "stopped" }],
+        removed: ["/rounds/my-sess.json"],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("--end-session without --session is a clean error", async () => {
     const dir = gitRepo();
     try {

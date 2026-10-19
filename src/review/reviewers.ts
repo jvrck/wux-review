@@ -390,6 +390,29 @@ export function validateObservableExecutionId(id: string): string {
   return id;
 }
 
+// End-session cleanup receives child names from durable state, which is not a
+// capability to stop an arbitrary Wux run. Parse the complete recorded identity
+// and prove that it belongs to the requested session before using it as argv.
+export function validateObservableChildName(
+  sessionId: string,
+  childName: string,
+): { reviewer: ReviewerName; attempt: number } {
+  const safeSessionId = validateSessionId(sessionId);
+  const escapedSessionId = safeSessionId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(
+    `^(.+)-${escapedSessionId}-r([1-9][0-9]*)-x([0-9a-f]{8})-(claude|codex)(?:-a([1-9][0-9]*))?$`,
+  ).exec(childName);
+  if (match === null) {
+    throw new WuxReviewError(`invalid observable child name for session ${safeSessionId}: ${JSON.stringify(childName)}`);
+  }
+  validateObservablePrefix(match[1]!);
+  validateObservableExecutionId(match[3]!);
+  return {
+    reviewer: match[4]! as ReviewerName,
+    attempt: match[5] === undefined ? 1 : Number(match[5]),
+  };
+}
+
 async function invoke(
   reviewer: ReviewerName,
   backend: Backend,

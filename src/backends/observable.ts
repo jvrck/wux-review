@@ -44,7 +44,7 @@ const WUX_PROBE_ATTEMPTS = 3;
 const WUX_LIVENESS_PROBE_INTERVAL_MS = 5 * 1000;
 const WUX_EVENT_LINE_LIMIT_BYTES = 1024 * 1024;
 const MACHINE_STREAM_EVIDENCE_FILE = "machine-stream.jsonl";
-const WUX_ALREADY_GONE_PATTERNS = [
+export const WUX_ALREADY_GONE_PATTERNS = [
   /^run not found:/i,
   /^run is not running(?:\s|$)/i,
   /^run is (?:already )?stopped(?::|$)/i,

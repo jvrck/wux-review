@@ -232,9 +232,15 @@ export interface ObservableRoundRecord {
 
 export interface ObservableRoundStore {
   load(reviewId: string): Promise<ObservableRoundRecord | undefined>;
+  inspectForEndSession?: (reviewId: string) => Promise<ObservableRoundEndSessionSnapshot>;
   save(record: ObservableRoundRecord): Promise<void>;
   clear(reviewId: string): Promise<void>;
   prune(now?: Date): Promise<void>;
+}
+
+export interface ObservableRoundEndSessionSnapshot {
+  record: ObservableRoundRecord | undefined;
+  files: string[];
 }
 
 export interface ObservableRoundStoreDeps {
@@ -317,6 +323,43 @@ export function createObservableRoundStore(
         throw new WuxReviewError(`observable round ${reviewId}: invalid recovery state at ${path}`);
       }
       return parsed.data as ObservableRoundRecord;
+    },
+    async inspectForEndSession(reviewId) {
+      const path = roundPath(deps, reviewId);
+      const temporaryPath = `${path}.tmp`;
+      let raw: string | undefined;
+      let temporaryRaw: string | undefined;
+      try {
+        [raw, temporaryRaw] = await Promise.all([
+          deps.readFile(path),
+          deps.readFile(temporaryPath),
+        ]);
+      } catch {
+        throw new WuxReviewError(`--end-session: could not read observable round journal ${path}`);
+      }
+      const files = [
+        ...(raw === undefined ? [] : [path]),
+        ...(temporaryRaw === undefined ? [] : [temporaryPath]),
+      ];
+      if (raw === undefined && temporaryRaw === undefined) {
+        return { record: undefined, files };
+      }
+      const parse = (value: string | undefined, file: string): ObservableRoundRecord | undefined => {
+        if (value === undefined) return undefined;
+        try {
+          const parsed = roundSchema.safeParse(JSON.parse(value));
+          if (!parsed.success || parsed.data.reviewId !== reviewId) {
+            throw new WuxReviewError(`--end-session: invalid observable round journal at ${file}`);
+          }
+          return parsed.data as ObservableRoundRecord;
+        } catch (error) {
+          if (error instanceof WuxReviewError) throw error;
+          throw new WuxReviewError(`--end-session: malformed observable round journal at ${file}`);
+        }
+      };
+      const main = parse(raw, path);
+      const temporary = parse(temporaryRaw, temporaryPath);
+      return { record: temporary ?? main, files };
     },
     async save(record) {
       validateRoundRecord(record);

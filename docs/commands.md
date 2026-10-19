@@ -35,11 +35,27 @@ check:
 | `--lenses <list>` | Comma-separated lens-set override (default: the v1 lens set). |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |
-| `--end-session` | With `--session <id>`, tear down any sessions for that id and exit (cleanup). |
+| `--end-session` | With `--session <id>`, stop that session's recorded reviewer children and exit (cleanup). |
 | `--refutations <file>` | JSON file of findings the worker has refuted with evidence; see [Refuting a finding](#refuting-a-finding). |
 | `--direct` | Emergency rollback: run the unchanged headless legs without Wux. Prompts, parsing, timeouts, retries, and verdict semantics are unchanged. |
 | `--inspect` | Compatibility alias for the default observable execution. |
 | `--json` / `--no-json` | Machine-readable (default for non-TTY) vs. human output. |
+
+### Ending a session
+
+`wux-review --session <id> --end-session` stops only the exact observable Wux
+child names recorded for that session, including recorded Codex retry attempts.
+It also consults the observable round journal so an interrupted round can still
+be cleaned up before its session state was written. It never lists or glob-matches
+live Wux runs. A direct-headless legacy name is considered only when the
+persisted state proves a direct round ran.
+
+The command reports every recorded child as `stopped`, `already-gone`, or
+`failed`, and `--json` emits the same report as an object. It removes the
+session state and the round journal (including their atomic temporary files)
+only after every child is stopped or confirmed gone. A stop failure leaves both
+records in place for retry. If the journal describes an in-progress round, use
+`wux-review reconcile <id>` first; end-session will not stop it mid-round.
 
 ## Refuting a finding
 

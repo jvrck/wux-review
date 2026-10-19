@@ -13,7 +13,7 @@ import { parseRefutations } from "./review/refutation";
 import { exitCodeFor, renderHuman, renderJson } from "./review/render";
 import { skillsCommand } from "./skills/show";
 import type { DualReviewResult, RunReviewersOptions } from "./review/reviewers";
-import { endSession as defaultEndSession } from "./review/session";
+import { endSession as defaultEndSession, type EndSessionReport } from "./review/session";
 import type { Refutation } from "./review/types";
 import { WuxReviewError } from "./runtime/errors";
 import { VERSION } from "./version";
@@ -26,7 +26,7 @@ export interface CliDeps {
   // pre-#100 `Promise<void>` seam backward-compatible — a void-returning stub still
   // typechecks, and the CLI defaults a missing result to [] (no signal, no crash).
   postToPr?: (pr: number, envelope: VerdictEnvelope) => Promise<PostResult[] | void>;
-  endSession?: (sessionId: string) => Promise<void>;
+  endSession?: (sessionId: string) => Promise<EndSessionReport | void>;
   loadConfig?: typeof defaultLoadConfig;
   runCheck?: (commands: string[]) => Promise<number>;
   reconcileReview?: (reviewId: string) => Promise<ReconcileOutcome>;
@@ -171,8 +171,14 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
         "--end-session only stops the session; it cannot be combined with review arguments (<ref>, --pr, --lenses, --post-to-pr, --refutations)",
       );
     }
-    await (deps.endSession ?? defaultEndSession)(opts.session);
-    process.stdout.write(`wux-review: ended session ${opts.session}\n`);
+    const report = await (deps.endSession ?? defaultEndSession)(opts.session);
+    if (report === undefined) {
+      process.stdout.write(`wux-review: ended session ${opts.session}\n`);
+    } else if (opts.json) {
+      process.stdout.write(`${JSON.stringify(report)}\n`);
+    } else {
+      process.stdout.write(renderEndSessionReport(report));
+    }
     return 0;
   }
 
@@ -241,6 +247,15 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
     }
   }
   return exitCodeFor(envelope);
+}
+
+function renderEndSessionReport(report: EndSessionReport): string {
+  if (report.nothingRecorded === true) {
+    return `wux-review: session ${report.sessionId}: nothing recorded to stop\n`;
+  }
+  const lines = report.children.map((child) => `wux-review: ${child.name}: ${child.status}`);
+  for (const file of report.removed) lines.push(`wux-review: removed ${file}`);
+  return `${lines.join("\n")}\n`;
 }
 
 function parseReconcileArgs(argv: string[]): {

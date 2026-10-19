@@ -1,5 +1,6 @@
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
+import { WuxReviewError } from "../runtime/errors";
 import { validateSessionId } from "./reviewers";
 import type { SessionState } from "./types";
 
@@ -103,6 +104,7 @@ const stateSchema = z.object({
 export interface SessionStore {
   load(sessionId: string): Promise<SessionState | undefined>;
   loadForCompare?: (sessionId: string) => Promise<SessionLoadSnapshot>;
+  inspectForEndSession?: (sessionId: string) => Promise<SessionEndSessionSnapshot>;
   save(sessionId: string, state: SessionState): Promise<void>;
   clear(sessionId: string): Promise<void>;
 }
@@ -114,6 +116,11 @@ export interface SessionLoadSnapshot {
   // replace after a context-free direct review. I/O failures are not: they may
   // hide a valid concurrent/newer state and remain fail-closed for writes.
   corrupt?: true;
+}
+
+export interface SessionEndSessionSnapshot {
+  state: SessionState | undefined;
+  files: string[];
 }
 
 // FS boundary, injected so the store is unit-testable without touching disk and
@@ -161,6 +168,39 @@ export function createSessionStore(overrides: Partial<SessionStoreDeps> = {}): S
     },
     async loadForCompare(sessionId) {
       return loadSnapshot(deps, sessionId);
+    },
+    async inspectForEndSession(sessionId) {
+      const path = statePath(deps, sessionId);
+      const temporaryPath = `${path}.tmp`;
+      let raw: string | undefined;
+      let temporaryRaw: string | undefined;
+      try {
+        [raw, temporaryRaw] = await Promise.all([
+          deps.readFile(path),
+          deps.readFile(temporaryPath),
+        ]);
+      } catch {
+        throw new WuxReviewError(`--end-session: could not read session state ${path}`);
+      }
+      const files = [
+        ...(raw === undefined ? [] : [path]),
+        ...(temporaryRaw === undefined ? [] : [temporaryPath]),
+      ];
+      if (raw === undefined && temporaryRaw === undefined) {
+        return { state: undefined, files };
+      }
+      const state = temporaryRaw === undefined
+        ? raw === undefined ? undefined : parseSessionState(raw)
+        : parseSessionState(temporaryRaw);
+      const invalidPath = temporaryRaw !== undefined && parseSessionState(temporaryRaw) === undefined
+        ? temporaryPath
+        : raw !== undefined && parseSessionState(raw) === undefined
+          ? path
+          : undefined;
+      if (invalidPath !== undefined || state === undefined) {
+        throw new WuxReviewError(`--end-session: invalid session state at ${invalidPath ?? path}`);
+      }
+      return { state, files };
     },
     async save(sessionId, state) {
       const path = statePath(deps, sessionId);
