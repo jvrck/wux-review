@@ -1321,15 +1321,20 @@ function codexSignalFromDirectStdout(
   stdout: string,
   parser?: MachineEventParser,
   streamObserved = false,
-) {
+): CodexExecutionSignal | undefined {
+  if (parser === undefined) {
+    const fallbackParser = new MachineEventParser("codex");
+    fallbackParser.push(new TextEncoder().encode(stdout));
+    fallbackParser.finish();
+    return fallbackParser.codexExecutionSignal();
+  }
   // Injected test runners predate incremental observation and do not invoke the
-  // callback. Keep their bounded fixture seam while production always observes
-  // the whole stream as it drains.
+  // callback. Keep their bounded fixture seam while production observes the
+  // whole stream as it drains. Reusing the supplied parser preserves sticky
+  // stderr sandbox diagnostics observed before an empty stdout stream.
   if (!streamObserved) {
-    parser = new MachineEventParser("codex");
     parser.push(new TextEncoder().encode(stdout));
   }
-  parser ??= new MachineEventParser("codex");
   parser.finish();
   return parser.codexExecutionSignal();
 }

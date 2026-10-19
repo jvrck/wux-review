@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +45,9 @@ interface Opts {
   runResults?: Partial<HeadlessRunResult>[];
   stdout?: string;
   codexStdout?: string;
+  // Production drains Codex stdout through the callback. Leave that callback
+  // off to exercise the injected-runner fallback seam explicitly.
+  invokeCodexStdoutCallback?: boolean;
   stderrChunks?: string[];
   writeThrows?: boolean;
   mkdirThrows?: boolean;
@@ -180,7 +183,11 @@ function harness(opts: Opts = {}) {
         ...opts.runResult,
         ...(seq ?? {}),
       };
-      if (cmd[0] === "codex" && result.stdout !== undefined) {
+      if (
+        cmd[0] === "codex"
+        && result.stdout !== undefined
+        && opts.invokeCodexStdoutCallback !== false
+      ) {
         runOpts.onStdoutChunk?.(Buffer.from(result.stdout));
       }
       if (cmd[0] === "codex") {
@@ -697,6 +704,51 @@ describe("createCodexHeadlessBackend", () => {
       sessionName: "sandbox-unavailable",
       direct: true,
     })).rejects.toThrow("sandbox unavailable");
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("keeps a sticky stderr sandbox diagnostic when production emits no stdout", async () => {
+    const filler = "x".repeat(HEADLESS_DEFAULT_STDERR_TAIL_BYTES + 1);
+    const h = harness({
+      codexRetries: 3,
+      codexStdout: "",
+      invokeCodexStdoutCallback: false,
+      runResult: { stdout: "", stderr: filler.slice(-HEADLESS_DEFAULT_STDERR_TAIL_BYTES) },
+      stderrChunks: ["Refusing to create helper binaries", filler],
+    });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "sandbox-no-stdout-direct",
+      direct: true,
+    })).rejects.toThrow("codex reviewer: sandbox unavailable");
+    expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
+  });
+
+  test("parses returned stdout through the supplied parser when an injected runner skips callbacks", async () => {
+    const h = harness({ invokeCodexStdoutCallback: false });
+    await expect(createCodexHeadlessBackend(h.deps)("P", {
+      sessionName: "fallback-stdout-direct",
+      direct: true,
+    })).resolves.toBe(REPORT);
+  });
+
+  test("does not reparse returned stdout after the observed stream already supplied its command", async () => {
+    const h = harness();
+    const original = MachineEventParser.prototype.codexExecutionSignal;
+    let commandExecutions: number | undefined;
+    const signalSpy = spyOn(MachineEventParser.prototype, "codexExecutionSignal").mockImplementation(function (this: MachineEventParser) {
+      const signal = original.call(this);
+      commandExecutions = signal?.commandExecutions;
+      return signal;
+    });
+    try {
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: "observed-stdout-direct",
+        direct: true,
+      })).resolves.toBe(REPORT);
+    } finally {
+      signalSpy.mockRestore();
+    }
+    expect(commandExecutions).toBe(1);
     expect(h.runs.filter(({ cmd }) => cmd[0] === "codex")).toHaveLength(1);
   });
 
