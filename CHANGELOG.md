@@ -11,6 +11,13 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Security
+
+- **Dependency security refresh.** Updated the MCP SDK and its resolved
+  `fast-uri` and `proxy-addr` dependencies to remediate current advisories, and
+  refreshed `actions/checkout` and `actions/upload-artifact`. Supersedes
+  Dependabot PRs #13 and #14.
+
 ## 2026.08.17
 
 - **Verified Darwin releases.** Darwin ARM64 release binaries are now explicitly
