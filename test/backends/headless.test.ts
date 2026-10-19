@@ -30,11 +30,7 @@ const CODEX_COMMAND = JSON.stringify({
   item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
-const REVIEWER_CWD = join(
-  CODEX_HOME_ROOT,
-  "wuxr-codex-home-claude-test",
-  "wuxr-reviewer-cwd-test",
-);
+const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
 
@@ -2578,24 +2574,15 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
 
 describe("prepareReviewerCwd (real fs)", () => {
   test("creates a unique mode-0700 directory per leg and removes each on teardown", async () => {
-    const state = await mkdtemp(join(tmpdir(), "wuxr-reviewer-state-"));
-    const prior = process.env.XDG_STATE_HOME;
-    process.env.XDG_STATE_HOME = state;
-    try {
-      const first = await prepareReviewerCwd();
-      const second = await prepareReviewerCwd();
-      expect(first.path).not.toBe(second.path);
-      expect((await stat(first.path)).mode & 0o777).toBe(0o700);
-      expect((await stat(second.path)).mode & 0o777).toBe(0o700);
-      await first.cleanup();
-      await second.cleanup();
-      expect(await Bun.file(first.path).exists()).toBe(false);
-      expect(await Bun.file(second.path).exists()).toBe(false);
-    } finally {
-      if (prior === undefined) delete process.env.XDG_STATE_HOME;
-      else process.env.XDG_STATE_HOME = prior;
-      await rm(state, { recursive: true, force: true });
-    }
+    const first = await prepareReviewerCwd();
+    const second = await prepareReviewerCwd();
+    expect(first.path).not.toBe(second.path);
+    expect((await stat(first.path)).mode & 0o777).toBe(0o700);
+    expect((await stat(second.path)).mode & 0o777).toBe(0o700);
+    await first.cleanup();
+    await second.cleanup();
+    expect(await Bun.file(first.path).exists()).toBe(false);
+    expect(await Bun.file(second.path).exists()).toBe(false);
   });
 });
 

@@ -41,7 +41,6 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
     join(CODEX_HOME_ROOT, "..", "outside"),
     join(CODEX_HOME_ROOT, "wrong-name"),
     join(tmpdir(), "wuxr-codex-home-old-location"),
-    join(tmpdir(), "wuxr-reviewer-cwd-old-location"),
     join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
   ]) {
     expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(

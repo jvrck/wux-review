@@ -815,26 +815,13 @@ async function pruneStaleCodexHomes(root: string): Promise<void> {
   }
 }
 
-export async function prepareReviewerCwd(parentDir?: string): Promise<ReviewerCwd> {
+export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<ReviewerCwd> {
   let createdPath: string | undefined;
-  let cleanupRoot: string | undefined;
   try {
-    if (parentDir === undefined) {
-      // Observable cleanup admits only private cwd directories nested in the
-      // state-root home shape. Claude has no CODEX_HOME, but uses this empty
-      // containment home so interrupted cleanup stays exact without accepting
-      // the old arbitrary tmpdir shape.
-      const root = await secureCodexHomeRoot();
-      cleanupRoot = await mkdtemp(join(root, "wuxr-codex-home-"));
-      await chmod(cleanupRoot, 0o700);
-      parentDir = cleanupRoot;
-    }
     createdPath = await mkdtemp(join(parentDir, "wuxr-reviewer-cwd-"));
     await chmod(createdPath, 0o700);
   } catch (error) {
-    if (cleanupRoot !== undefined) {
-      await rm(cleanupRoot, { recursive: true, force: true }).catch(() => undefined);
-    } else if (createdPath !== undefined) {
+    if (createdPath !== undefined) {
       await rm(createdPath, { recursive: true, force: true }).catch(() => undefined);
     }
     throw new WuxReviewError(
@@ -845,9 +832,9 @@ export async function prepareReviewerCwd(parentDir?: string): Promise<ReviewerCw
   return {
     path,
     cleanup: async () => {
-      await rm(cleanupRoot ?? path, { recursive: true, force: true }).catch(() => undefined);
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
     },
-    observableCleanupPath: cleanupRoot ?? path,
+    observableCleanupPath: path,
   };
 }
 

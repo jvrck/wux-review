@@ -2978,6 +2978,13 @@ function isValidCodexCleanupDir(dir: string): boolean {
     name.startsWith("wuxr-reviewer-cwd-")
     && dirname(home) === root
     && basename(home).startsWith("wuxr-codex-home-")
+  ) || (
+    // Claude still creates its independently-isolated cwd under tmpdir(). This
+    // is the only production non-Codex-home cleanup shape; accepting the exact
+    // direct child prefix preserves interruption cleanup without admitting a
+    // temp CODEX_HOME or arbitrary temporary path.
+    dirname(candidate) === resolve(tmpdir())
+    && name.startsWith("wuxr-reviewer-cwd-")
   );
 }
 
