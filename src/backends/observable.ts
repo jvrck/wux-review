@@ -1,6 +1,6 @@
 import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
@@ -25,6 +25,7 @@ import {
   machineStreamChunkRecord,
   type ParsedMachineEvent,
 } from "./observable-events";
+import { codexHomeRoot } from "./codex-home";
 
 const WUX_COMMAND_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -2966,7 +2967,7 @@ export function validateObservableCleanup(
 
 function isValidCodexCleanupDir(dir: string): boolean {
   if (!isAbsolute(dir) || dir === "/") return false;
-  const root = resolve(observableCodexHomeRoot());
+  const root = resolve(codexHomeRoot());
   const candidate = resolve(dir);
   const name = basename(candidate);
   if (dirname(candidate) === root && name.startsWith("wuxr-codex-home-")) {
@@ -2977,22 +2978,7 @@ function isValidCodexCleanupDir(dir: string): boolean {
     name.startsWith("wuxr-reviewer-cwd-")
     && dirname(home) === root
     && basename(home).startsWith("wuxr-codex-home-")
-  ) || (
-    // Claude still creates its independently-isolated cwd under tmpdir(). This
-    // is the only production non-Codex-home cleanup shape; accepting the exact
-    // direct child prefix preserves interruption cleanup without admitting a
-    // temp CODEX_HOME or arbitrary temporary path.
-    dirname(candidate) === resolve(tmpdir())
-    && name.startsWith("wuxr-reviewer-cwd-")
   );
-}
-
-function observableCodexHomeRoot(): string {
-  const xdg = process.env.XDG_STATE_HOME;
-  const stateHome = xdg !== undefined && xdg !== "" && isAbsolute(xdg)
-    ? xdg
-    : join(homedir(), ".local", "state");
-  return join(stateHome, "wux-review", "codex-homes");
 }
 
 function shq(path: string): string {

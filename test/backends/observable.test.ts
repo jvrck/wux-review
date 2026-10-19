@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   defaultObservableDeps,
   discardObservableLeg,
@@ -15,6 +15,7 @@ import {
   type ObservableLegInput,
   type ObservableRunOptions,
 } from "../../src/backends/observable";
+import { codexHomeRoot } from "../../src/backends/codex-home";
 import { REVIEWER_STDERR_TAIL_BYTES } from "../../src/backends/capture-limits";
 import {
   MACHINE_EVENT_READ_CHUNK_BYTES,
@@ -27,15 +28,7 @@ const CLAUDE_STREAM = JSON.stringify({
   is_error: false,
   result: REPORT,
 });
-const CODEX_HOME_ROOT = join(
-  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
-    ? process.env.XDG_STATE_HOME
-    : homedir(),
-  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
-    ? "wux-review"
-    : ".local/state/wux-review",
-  "codex-homes",
-);
+const CODEX_HOME_ROOT = codexHomeRoot();
 
 test("validateObservableCleanup accepts only expected Codex home shapes", () => {
   const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
@@ -48,6 +41,7 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
     join(CODEX_HOME_ROOT, "..", "outside"),
     join(CODEX_HOME_ROOT, "wrong-name"),
     join(tmpdir(), "wuxr-codex-home-old-location"),
+    join(tmpdir(), "wuxr-reviewer-cwd-old-location"),
     join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
   ]) {
     expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(

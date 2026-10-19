@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, createHmac } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { HeadlessRunOptions } from "../../src/backends/headless";
+import { codexHomeRoot } from "../../src/backends/codex-home";
 import { reconcileReview } from "../../src/review/observable-recovery";
 import type {
   ObservableRoundRecord,
@@ -18,15 +19,7 @@ const CLAUDE_STREAM = JSON.stringify({
   is_error: false,
   result: REPORT,
 });
-const CODEX_HOME_ROOT = join(
-  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
-    ? process.env.XDG_STATE_HOME
-    : homedir(),
-  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
-    ? "wux-review"
-    : ".local/state/wux-review",
-  "codex-homes",
-);
+const CODEX_HOME_ROOT = codexHomeRoot();
 
 function recoveryHarness(options: {
   taintReviewer?: "claude" | "codex";
@@ -499,7 +492,7 @@ describe("observable parent recovery", () => {
       sessionStore: h.sessionStore,
       run: h.run,
       observable: h.observable,
-    })).rejects.toThrow("ran zero commands");
+    })).rejects.toThrow("missing execution signal");
   });
 
   test("reconciles two complete untainted legs with zero model calls and cleans transients", async () => {

@@ -23,6 +23,15 @@ the final findings file is empty. Sandbox-unavailable failures are deterministic
 and do not consume retry attempts; other stream failures use the normal bounded
 retry policy.
 
+## Interrupted-round upgrade note
+
+Before upgrading, reconcile interrupted observable rounds with the binary that
+created them. The upgraded binary intentionally rejects a pre-upgrade temporary
+cleanup directory rather than weakening its cleanup guard; remove that old
+directory manually if it cannot be reconciled first. Run reconciliation with
+the same `XDG_STATE_HOME` that the round used, because recovery resolves its
+state-home location from the current environment.
+
 ## What runs
 - **Reporting scan** (`dependency-scan`): verifies the text `bun.lock` (not
   `bun.lockb`), installs OSV-Scanner + Trivy, then scans the declared dependency

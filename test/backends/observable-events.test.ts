@@ -50,6 +50,59 @@ describe("observable machine-event capture", () => {
       item: { type: "command_execution", exit_code: 1, status: "failed" },
     })}\n`));
     expect(nonZero.codexExecutionSignal()?.commandExecutions).toBe(1);
+
+    const started = new MachineEventParser("codex");
+    started.push(Buffer.from(`${JSON.stringify({
+      type: "item.started",
+      item: {
+        type: "command_execution",
+        aggregated_output: "Unable to spawn codex-linux-sandbox",
+      },
+    })}\n`));
+    expect(codexExecutionFailure(started.codexExecutionSignal(), "")).toBe("ran zero commands");
+    expect(codexExecutionFailure(undefined, "")).toBe("missing execution signal");
+  });
+
+  test("Codex classifies oversized completed commands without retaining their output", () => {
+    const completed = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "item_1",
+        type: "command_execution",
+        aggregated_output: [
+          "Refusing to create helper binaries",
+          "Unable to spawn codex-linux-sandbox",
+          "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES),
+        ].join("\n"),
+        exit_code: 0,
+        status: "completed",
+      },
+    });
+    const parser = new MachineEventParser("codex");
+    expect(parser.push(Buffer.from(`${completed}\n`))).toEqual([{
+      observation: {},
+      diagnostic: { kind: "oversized" },
+    }]);
+    expect(codexExecutionFailure(parser.codexExecutionSignal(), "")).toBeUndefined();
+    expect(parser.codexExecutionSignal()?.commandExecutions).toBe(1);
+
+    const nonCommand = new MachineEventParser("codex");
+    nonCommand.push(Buffer.from(`${JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "reasoning",
+        aggregated_output: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1),
+        exit_code: 0,
+        status: "completed",
+      },
+    })}\n`));
+    expect(nonCommand.codexExecutionSignal()?.commandExecutions).toBe(0);
+
+    const malformed = new MachineEventParser("codex");
+    malformed.push(Buffer.from(
+      `{"type":"item.completed","item":{"type":"command_execution","aggregated_output":"${"x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1)}","exit_code":0}\n`,
+    ));
+    expect(malformed.codexExecutionSignal()?.commandExecutions).toBe(0);
   });
   test("base64 chunk records reconstruct raw JSONL byte-for-byte across partial writes", async () => {
     const raw = await Bun.file(

@@ -2,7 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import type { Dirent } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
 import type { Backend, BackendOptions } from "../review/reviewers";
 import type { ReviewerName } from "../review/types";
@@ -16,9 +16,10 @@ import {
   codexExecutionFailure,
   MachineEventParser,
   isClaudeResultEvent,
-  MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
 } from "./observable-events";
+import { codexHomeRoot } from "./codex-home";
+import type { CodexExecutionSignal } from "./observable-events";
 
 // Headless reviewer legs: drive each model as a one-shot, non-interactive
 // subprocess that runs the review and *exits* — no `wux run` TUI, no instruction
@@ -183,7 +184,7 @@ export interface HeadlessRunResult {
   // Candidate observable transport only: a validated output file (Codex `-o`)
   // read back through the atomic result.json contract.
   structuredOutput?: string;
-  codexSignal?: import("./observable-events").CodexExecutionSignal;
+  codexSignal?: CodexExecutionSignal;
 }
 
 export type HeadlessRun = (cmd: string[], opts: HeadlessRunOptions) => Promise<HeadlessRunResult>;
@@ -761,32 +762,37 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
   }
 }
 
-// Only an absolute XDG state directory is valid. A relative value is explicitly
-// ignored by the XDG base-directory spec, avoiding a state path controlled by a
-// caller's current directory.
-export function codexHomeRoot(): string {
-  const xdg = process.env.XDG_STATE_HOME;
-  const stateHome = xdg !== undefined && xdg !== "" && isAbsolute(xdg)
-    ? xdg
-    : join(homedir(), ".local", "state");
-  return join(stateHome, "wux-review", "codex-homes");
-}
+export { codexHomeRoot } from "./codex-home";
 
 async function secureCodexHomeRoot(): Promise<string> {
   const root = codexHomeRoot();
   try {
+    const appRoot = dirname(root);
+    // XDG_STATE_HOME itself may legitimately be symlink-managed, but the
+    // wux-review component we create must not redirect private homes elsewhere.
+    await mkdir(appRoot, { recursive: true, mode: 0o700 });
+    await assertSecureStateDirectory(appRoot);
     await mkdir(root, { recursive: true, mode: 0o700 });
-    const metadata = await lstat(root);
-    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-    if (!metadata.isDirectory() || metadata.isSymbolicLink() || (uid !== undefined && metadata.uid !== uid)) {
-      throw new Error("state root is not a real directory owned by the current user");
-    }
+    await assertSecureStateDirectory(root);
+    await chmod(appRoot, 0o700);
     await chmod(root, 0o700);
     return root;
   } catch (error) {
     throw new WuxReviewError(
       `codex reviewer: cannot create secure per-leg CODEX_HOME root: ${errorDetail(error)}`,
     );
+  }
+}
+
+async function assertSecureStateDirectory(path: string): Promise<void> {
+  const metadata = await lstat(path);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (
+    !metadata.isDirectory()
+    || metadata.isSymbolicLink()
+    || (uid !== undefined && metadata.uid !== uid)
+  ) {
+    throw new Error("state root is not a real directory owned by the current user");
   }
 }
 
@@ -809,13 +815,26 @@ async function pruneStaleCodexHomes(root: string): Promise<void> {
   }
 }
 
-export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<ReviewerCwd> {
+export async function prepareReviewerCwd(parentDir?: string): Promise<ReviewerCwd> {
   let createdPath: string | undefined;
+  let cleanupRoot: string | undefined;
   try {
+    if (parentDir === undefined) {
+      // Observable cleanup admits only private cwd directories nested in the
+      // state-root home shape. Claude has no CODEX_HOME, but uses this empty
+      // containment home so interrupted cleanup stays exact without accepting
+      // the old arbitrary tmpdir shape.
+      const root = await secureCodexHomeRoot();
+      cleanupRoot = await mkdtemp(join(root, "wuxr-codex-home-"));
+      await chmod(cleanupRoot, 0o700);
+      parentDir = cleanupRoot;
+    }
     createdPath = await mkdtemp(join(parentDir, "wuxr-reviewer-cwd-"));
     await chmod(createdPath, 0o700);
   } catch (error) {
-    if (createdPath !== undefined) {
+    if (cleanupRoot !== undefined) {
+      await rm(cleanupRoot, { recursive: true, force: true }).catch(() => undefined);
+    } else if (createdPath !== undefined) {
       await rm(createdPath, { recursive: true, force: true }).catch(() => undefined);
     }
     throw new WuxReviewError(
@@ -826,9 +845,9 @@ export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<Reviewer
   return {
     path,
     cleanup: async () => {
-      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+      await rm(cleanupRoot ?? path, { recursive: true, force: true }).catch(() => undefined);
     },
-    observableCleanupPath: path,
+    observableCleanupPath: cleanupRoot ?? path,
   };
 }
 
@@ -898,7 +917,7 @@ async function execLeg(
     env: input.env,
     stdoutTailBytes: input.reviewer === "claude"
       ? HEADLESS_DEFAULT_STDOUT_TAIL_BYTES
-      : MACHINE_EVENT_PARSE_LIMIT_BYTES + 2,
+      : 0,
     stderrTailBytes: HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
     onStdoutChunk: input.onStdoutChunk,
   });

@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import {
   createClaudeHeadlessBackend,
   createCodexHeadlessBackend,
-  codexHomeRoot,
   defaultHeadlessRun,
   HEADLESS_DEFAULT_STDERR_TAIL_BYTES,
   HEADLESS_DEFAULT_STDOUT_TAIL_BYTES,
@@ -18,6 +17,7 @@ import {
   type HeadlessRunResult,
 } from "../../src/backends/headless";
 import { buildObservableWrapperScript } from "../../src/backends/observable";
+import { codexHomeRoot } from "../../src/backends/codex-home";
 import {
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
@@ -29,15 +29,11 @@ const CODEX_COMMAND = JSON.stringify({
   type: "item.completed",
   item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
-const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
-const CODEX_HOME_ROOT = join(
-  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
-    ? process.env.XDG_STATE_HOME
-    : homedir(),
-  process.env.XDG_STATE_HOME !== undefined && isAbsolute(process.env.XDG_STATE_HOME)
-    ? "wux-review"
-    : ".local/state/wux-review",
-  "codex-homes",
+const CODEX_HOME_ROOT = codexHomeRoot();
+const REVIEWER_CWD = join(
+  CODEX_HOME_ROOT,
+  "wuxr-codex-home-claude-test",
+  "wuxr-reviewer-cwd-test",
 );
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
@@ -607,7 +603,7 @@ describe("createCodexHeadlessBackend", () => {
     // No stdin is piped (the diff is read from the brief file, not argv/stdin).
     expect(runs[0]!.opts.stdin).toBeUndefined();
     expect(runs[0]!.opts.cwd).toBe(REVIEWER_CWD);
-    expect(runs[0]!.opts.stdoutTailBytes).toBe(MACHINE_EVENT_PARSE_LIMIT_BYTES + 2);
+    expect(runs[0]!.opts.stdoutTailBytes).toBe(0);
     expect(runs[0]!.opts.stderrTailBytes).toBe(HEADLESS_DEFAULT_STDERR_TAIL_BYTES);
     expect(writes[0]).toMatchObject({ path: "/tmp/test/wuxr-s1-codex-prompt.md", content: "PROMPT BODY" });
     // The verdict is read from the -o last-message file...
@@ -713,6 +709,25 @@ describe("createCodexHeadlessBackend", () => {
       const h = harness({ codexStdout });
       await expect(createCodexHeadlessBackend(h.deps)("P", {
         sessionName: `completed-brief-${direct}`,
+        direct,
+      })).resolves.toBe(REPORT);
+    }
+  });
+
+  test("accepts a completed oversized brief-read in direct and observable modes", async () => {
+    const codexStdout = JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        aggregated_output: "x".repeat(MACHINE_EVENT_PARSE_LIMIT_BYTES + 1),
+        exit_code: 0,
+        status: "completed",
+      },
+    });
+    for (const direct of [true, false]) {
+      const h = harness({ codexStdout });
+      await expect(createCodexHeadlessBackend(h.deps)("P", {
+        sessionName: `oversized-brief-${direct}`,
         direct,
       })).resolves.toBe(REPORT);
     }
@@ -2224,7 +2239,7 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     }
   });
 
-  test("ignores relative XDG state homes and refuses a symlinked state root", async () => {
+  test("ignores relative XDG state homes and permits a symlinked XDG state root", async () => {
     const prior = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = "relative-state";
     try {
@@ -2236,8 +2251,41 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
       else process.env.XDG_STATE_HOME = prior;
     }
 
+    const stateTarget = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
+    const stateLink = `${stateTarget}-link`;
+    await symlink(stateTarget, stateLink);
+    process.env.XDG_STATE_HOME = stateLink;
+    try {
+      const home = await prepareIsolatedCodexHome();
+      await home.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(stateLink, { force: true });
+      await rm(stateTarget, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a symlinked wux-review state component", async () => {
     const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
     const target = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
+    const prior = process.env.XDG_STATE_HOME;
+    await symlink(target, join(state, "wux-review"));
+    process.env.XDG_STATE_HOME = state;
+    try {
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a symlinked codex-homes root", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const target = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
+    const prior = process.env.XDG_STATE_HOME;
     await mkdir(join(state, "wux-review"), { recursive: true });
     await symlink(target, join(state, "wux-review", "codex-homes"));
     process.env.XDG_STATE_HOME = state;
@@ -2530,15 +2578,24 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
 
 describe("prepareReviewerCwd (real fs)", () => {
   test("creates a unique mode-0700 directory per leg and removes each on teardown", async () => {
-    const first = await prepareReviewerCwd();
-    const second = await prepareReviewerCwd();
-    expect(first.path).not.toBe(second.path);
-    expect((await stat(first.path)).mode & 0o777).toBe(0o700);
-    expect((await stat(second.path)).mode & 0o777).toBe(0o700);
-    await first.cleanup();
-    await second.cleanup();
-    expect(await Bun.file(first.path).exists()).toBe(false);
-    expect(await Bun.file(second.path).exists()).toBe(false);
+    const state = await mkdtemp(join(tmpdir(), "wuxr-reviewer-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const first = await prepareReviewerCwd();
+      const second = await prepareReviewerCwd();
+      expect(first.path).not.toBe(second.path);
+      expect((await stat(first.path)).mode & 0o777).toBe(0o700);
+      expect((await stat(second.path)).mode & 0o777).toBe(0o700);
+      await first.cleanup();
+      await second.cleanup();
+      expect(await Bun.file(first.path).exists()).toBe(false);
+      expect(await Bun.file(second.path).exists()).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
   });
 });
 

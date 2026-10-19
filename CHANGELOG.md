@@ -19,6 +19,15 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   Codex 0.162+ can start its sandbox. Codex approvals on affected hosts since
   that release should be treated as unreliable.
 
+### Upgrade notes
+
+- **Reconcile interrupted rounds before upgrading.** Reconcile an interrupted
+  observable round with the old binary before installing this version. The new
+  cleanup guard rejects pre-upgrade temporary cleanup directories rather than
+  widening its authority; if the old binary cannot reconcile the round, remove
+  that old directory manually. Reconcile with the same `XDG_STATE_HOME` that
+  created the round.
+
 ### Security
 
 - **Dependency security refresh.** Updated the MCP SDK and its resolved
