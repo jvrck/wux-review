@@ -1,6 +1,5 @@
 import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
@@ -25,7 +24,7 @@ import {
   machineStreamChunkRecord,
   type ParsedMachineEvent,
 } from "./observable-events";
-import { codexHomeRoot } from "./codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "./codex-home";
 
 const WUX_COMMAND_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -559,6 +558,7 @@ export function buildObservableWrapperScript(paths: {
   recoveryOutputPath?: string;
   cleanupFiles?: string[];
   cleanupDir?: string;
+  cwd?: string;
 }): string {
   const redir = paths.stdinPath === undefined ? "< /dev/null" : `< ${shq(paths.stdinPath)}`;
   const command = paths.envPath === undefined
@@ -638,9 +638,35 @@ export function buildObservableWrapperScript(paths: {
         ...(paths.cleanupFiles ?? []).map((path) => `  ${helper} rm -f -- ${shq(path)}`),
         ...(paths.cleanupDir === undefined
           ? []
-          : [`  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`]),
+          : [
+              `  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
+              ...(codexHomeMarkerForCleanup(paths.cleanupDir) === undefined
+                ? []
+                : [`  ${helper} rm -f -- ${shq(codexHomeMarkerForCleanup(paths.cleanupDir)!)}`]),
+            ]),
         "}",
         "trap __cleanup_observable EXIT",
+      ];
+  const cwdCheckedInvoke = paths.cwd === undefined
+    ? timedInvoke
+    : [
+        `__wuxr_cwd=${shq(paths.cwd)}`,
+        `__wuxr_evidence=$(cat ${shq(paths.readyPath)})`,
+        'if [ ! -d "$__wuxr_cwd" ]; then',
+        '  printf \'{"type":"reviewer-cwd","phase":"before","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        `  printf %s ${shq(`claude reviewer: working directory ${paths.cwd} was removed before the leg`)} > ${shq(paths.stderrPath)}`,
+        "  __rc=125",
+        "else",
+        '  printf \'{"type":"reviewer-cwd","phase":"before","exists":true}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        ...timedInvoke,
+        '  if [ ! -d "$__wuxr_cwd" ]; then',
+        '    printf \'{"type":"reviewer-cwd","phase":"after","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        `    printf '\\n%s' ${shq(`claude reviewer: working directory ${paths.cwd} was removed during the leg`)} >> ${shq(paths.stderrPath)}`,
+        "    __rc=125",
+        "  else",
+        '    printf \'{"type":"reviewer-cwd","phase":"after","exists":true}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        "  fi",
+        "fi",
       ];
   const parentGuard = [
     `  if [ ! -e ${shq(paths.argsPath)} ]; then exit 126; fi`,
@@ -720,13 +746,20 @@ export function buildObservableWrapperScript(paths: {
         ]),
     ...pane,
     ...cleanup,
-    ...timedInvoke,
+    ...cwdCheckedInvoke,
     ...preserveOutput,
     'printf %s "$__rc" > ' + shq(`${paths.donePath}.tmp`),
     `${helper} mv ${shq(`${paths.donePath}.tmp`)} ${shq(paths.donePath)}`,
     ...release,
     "",
   ].join("\n");
+}
+
+function codexHomeMarkerForCleanup(dir: string): string | undefined {
+  const root = resolve(codexHomeRoot());
+  const candidate = resolve(dir);
+  if (dirname(candidate) !== root || !basename(candidate).startsWith("wuxr-codex-home-")) return undefined;
+  return join(root, `${basename(candidate)}.wuxr-last-use`);
 }
 
 export async function runObservableLeg(
@@ -873,6 +906,7 @@ export async function runObservableLeg(
         recoveryOutputPath: input.outputPath === undefined ? undefined : recoveryOutputPath,
         cleanupFiles: input.cleanupFiles,
         cleanupDir: input.cleanupDir,
+        cwd: input.reviewer === "claude" ? input.cwd : undefined,
         releaseAckToken: resultId,
         parentPid: process.pid,
       }),
@@ -3014,11 +3048,10 @@ function isValidCodexCleanupDir(dir: string): boolean {
     && dirname(home) === root
     && basename(home).startsWith("wuxr-codex-home-")
   ) || (
-    // Claude still creates its independently-isolated cwd under tmpdir(). This
-    // is the only production non-Codex-home cleanup shape; accepting the exact
-    // direct child prefix preserves interruption cleanup without admitting a
-    // temp CODEX_HOME or arbitrary temporary path.
-    dirname(candidate) === resolve(tmpdir())
+    // Claude owns a sibling private state root. Restrict this to an immediate
+    // own-prefix child so observable cleanup can never recurse through a shared
+    // state directory or accept a lookalike nested path.
+    dirname(candidate) === resolve(reviewerCwdRoot())
     && name.startsWith("wuxr-reviewer-cwd-")
   );
 }

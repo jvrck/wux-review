@@ -3,6 +3,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildObservableWrapperScript,
   defaultObservableDeps,
   discardObservableLeg,
   discardPreparedObservableLeg,
@@ -15,7 +16,7 @@ import {
   type ObservableLegInput,
   type ObservableRunOptions,
 } from "../../src/backends/observable";
-import { codexHomeRoot } from "../../src/backends/codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "../../src/backends/codex-home";
 import { REVIEWER_STDERR_TAIL_BYTES } from "../../src/backends/capture-limits";
 import {
   MACHINE_EVENT_READ_CHUNK_BYTES,
@@ -29,12 +30,15 @@ const CLAUDE_STREAM = JSON.stringify({
   result: REPORT,
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
+const REVIEWER_CWD_ROOT = reviewerCwdRoot();
 
 test("validateObservableCleanup accepts only expected Codex home shapes", () => {
   const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
   const cwd = join(home, "wuxr-reviewer-cwd-def");
+  const claudeCwd = join(REVIEWER_CWD_ROOT, "wuxr-reviewer-cwd-def");
   expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
   expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], claudeCwd, "/tmp/adapter")).not.toThrow();
   for (const unsafe of [
     "/",
     "relative",
@@ -47,6 +51,19 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
       "unsafe observable cleanup directory",
     );
   }
+});
+
+test("observable cleanup removes the exact sibling Codex last-use marker", () => {
+  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-marker");
+  const script = buildObservableWrapperScript({
+    argsPath: "/tmp/args",
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    donePath: "/tmp/done",
+    readyPath: "/tmp/ready",
+    cleanupDir: home,
+  });
+  expect(script).toContain(`rm -f -- '${join(CODEX_HOME_ROOT, "wuxr-codex-home-marker.wuxr-last-use")}'`);
 });
 
 interface HarnessOptions {
