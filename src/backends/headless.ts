@@ -859,12 +859,14 @@ async function pruneStaleCodexHomes(
       // A real parent-owned marker is authoritative. A legacy unmarked home
       // falls back to its directory mtime; clamp either source so a reviewer
       // cannot retain abandoned state indefinitely by writing a future time.
-      const lastUse = Math.min(
-        marker?.isFile() === true && !marker.isSymbolicLink()
-          ? marker.mtimeMs
-          : metadata.mtimeMs,
-        Date.now(),
-      );
+      const validMarker = marker?.isFile() === true && !marker.isSymbolicLink();
+      const lastUse = Math.min(validMarker ? marker.mtimeMs : metadata.mtimeMs, Date.now());
+      // Adopt a legacy unmarked home once. The sibling marker is parent-owned,
+      // never written inside CODEX_HOME, and fixes the first-seen timestamp so
+      // a future-dated legacy directory cannot defer pruning indefinitely.
+      if (marker === undefined) {
+        await adoptLegacyCodexHomeMarker(markerPath, lastUse);
+      }
       if (lastUse >= cutoff) return;
       await rm(path, { recursive: true, force: true });
       await rm(markerPath, { force: true });
@@ -875,6 +877,16 @@ async function pruneStaleCodexHomes(
     // deleting an old one, so failure remains visible but never blocks a leg.
     process.stderr.write(`codex reviewer: stale-home pruning failed: ${oneLine(errorDetail(error))}\n`);
   }
+}
+
+async function adoptLegacyCodexHomeMarker(marker: string, lastUse: number): Promise<void> {
+  try {
+    await writeFile(marker, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+    throw error;
+  }
+  await utimes(marker, new Date(lastUse), new Date(lastUse));
 }
 
 async function pruneOrphanedCodexMarkers(root: string, cutoff: number): Promise<void> {
