@@ -646,7 +646,7 @@ export function buildObservableWrapperScript(paths: {
     ? timedInvoke
     : [
         `__wuxr_cwd=${shq(paths.cwd)}`,
-        `__wuxr_evidence=$(< ${shq(paths.readyPath)})`,
+        `__wuxr_evidence=$(cat ${shq(paths.readyPath)})`,
         'if [ ! -d "$__wuxr_cwd" ]; then',
         '  printf \'{"type":"reviewer-cwd","phase":"before","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
         `  printf %s ${shq(`claude reviewer: working directory ${paths.cwd} was removed before the leg`)} > ${shq(paths.stderrPath)}`,
@@ -656,7 +656,7 @@ export function buildObservableWrapperScript(paths: {
         ...timedInvoke,
         '  if [ ! -d "$__wuxr_cwd" ]; then',
         '    printf \'{"type":"reviewer-cwd","phase":"after","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
-        `    printf %s ${shq(`claude reviewer: working directory ${paths.cwd} was removed during the leg`)} >> ${shq(paths.stderrPath)}`,
+        `    printf '\\n%s' ${shq(`claude reviewer: working directory ${paths.cwd} was removed during the leg`)} >> ${shq(paths.stderrPath)}`,
         "    __rc=125",
         "  else",
         '    printf \'{"type":"reviewer-cwd","phase":"after","exists":true}\\n\' >> "$__wuxr_evidence/events.jsonl"',

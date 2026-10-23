@@ -11,9 +11,11 @@ adversarial verification are documented in the
 Each Codex review leg gets a fresh mode-`0700` `CODEX_HOME` under
 `${XDG_STATE_HOME:-~/.local/state}/wux-review/codex-homes/`; relative XDG state
 paths are ignored. The root is verified as a real, current-user-owned directory
-and is mode `0700`; homes are removed at normal completion. A best-effort prune
-at the next Codex-leg start removes only an abandoned real own-prefix home: its
-last-use marker (or, for a pre-marker home, directory mtime) must be older than
+and is mode `0700`; homes are removed at normal completion. A parent-owned
+last-use marker sits beside each home under the `codex-homes` root, rather than
+inside the child-writable home. A best-effort prune at the next Codex-leg start
+removes only an abandoned real own-prefix home: its last-use marker (or, for a
+pre-marker home, directory mtime) must be older than
 the larger of 24 hours and twice the configured Codex maximum timeout, and no
 in-flight or cleanup-pending observable round may name it. This location is
 outside the system temporary directory so Codex 0.162+ can create its read-only

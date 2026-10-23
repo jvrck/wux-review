@@ -242,8 +242,10 @@ export interface ObservableRoundStore {
 // survive even if its last-use marker is old; the journal is the durable owner
 // after an observable parent has exited. Deliberately do not acquire a recovery
 // lock or promote a temporary journal here: pruning is hygiene, not recovery.
-export async function activeObservableCleanupDirs(): Promise<Set<string>> {
-  const deps = defaultDeps();
+export async function activeObservableCleanupDirs(
+  overrides: Partial<Pick<ObservableRoundStoreDeps, "stateDir" | "readFile" | "list">> = {},
+): Promise<Set<string>> {
+  const deps = { ...defaultDeps(), ...overrides };
   const dirs = new Set<string>();
   for (const name of await deps.list(deps.stateDir)) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.json(?:\.tmp)?$/.test(name)) continue;
