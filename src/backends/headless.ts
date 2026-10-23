@@ -1,7 +1,7 @@
 import { constants as fsConstants } from "node:fs";
 import type { Dirent } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
 import type { Backend, BackendOptions } from "../review/reviewers";
@@ -18,8 +18,9 @@ import {
   isClaudeResultEvent,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
 } from "./observable-events";
-import { codexHomeRoot } from "./codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "./codex-home";
 import type { CodexExecutionSignal } from "./observable-events";
+import { activeObservableCleanupDirs } from "../review/observable-lifecycle";
 
 // Headless reviewer legs: drive each model as a one-shot, non-interactive
 // subprocess that runs the review and *exits* — no `wux run` TUI, no instruction
@@ -81,6 +82,7 @@ export const HEADLESS_DEFAULT_STDERR_TAIL_BYTES = REVIEWER_STDERR_TAIL_BYTES;
 // are not trusted as reviewer input and Codex can recreate them inside the
 // throwaway home.
 const CODEX_HOME_SEED_FILES = ["auth.json", "version.json", "installation_id"];
+const CODEX_HOME_LAST_USE_MARKER = ".wuxr-last-use";
 
 // Config is untrusted setup input and is read before the bounded reviewer child
 // exists. Keep each layer small enough that a regular file cannot exhaust setup
@@ -360,6 +362,7 @@ export interface CodexHome {
   // hands this exact path to its wrapper so a parent interruption cannot delete
   // CODEX_HOME while the bounded child is still using it.
   observableCleanupPath?: string;
+  touchLastUse?: () => Promise<void>;
 }
 
 export interface ReviewerCwd {
@@ -675,6 +678,7 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
     await pruneStaleCodexHomes(root);
     createdHome = await mkdtemp(join(root, "wuxr-codex-home-"));
     await chmod(createdHome, 0o700);
+    await touchCodexHomeLastUse(createdHome);
   } catch (error) {
     if (createdHome !== undefined) {
       await rm(createdHome, { recursive: true, force: true }).catch(() => undefined);
@@ -756,6 +760,7 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
       cleanup,
       diagnostics,
       observableCleanupPath: home,
+      touchLastUse: () => touchCodexHomeLastUse(home),
     };
   } catch (error) {
     await cleanup();
@@ -788,6 +793,24 @@ async function secureCodexHomeRoot(): Promise<string> {
   }
 }
 
+async function secureReviewerCwdRoot(): Promise<string> {
+  const root = reviewerCwdRoot();
+  try {
+    const appRoot = dirname(root);
+    await mkdir(appRoot, { recursive: true, mode: 0o700 });
+    await assertSecureStateDirectory(appRoot);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await assertSecureStateDirectory(root);
+    await chmod(appRoot, 0o700);
+    await chmod(root, 0o700);
+    return root;
+  } catch (error) {
+    throw new WuxReviewError(
+      `reviewer: cannot create secure per-leg working-directory root: ${errorDetail(error)}`,
+    );
+  }
+}
+
 async function assertSecureStateDirectory(path: string): Promise<void> {
   const metadata = await lstat(path);
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
@@ -801,15 +824,22 @@ async function assertSecureStateDirectory(path: string): Promise<void> {
 }
 
 async function pruneStaleCodexHomes(root: string): Promise<void> {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   try {
+    const referenced = await activeObservableCleanupDirs();
+    const cutoff = Date.now() - Math.max(
+      24 * 60 * 60 * 1000,
+      2 * envInt("WUX_REVIEW_CODEX_MAX_TIMEOUT_MS", DEFAULT_CODEX_MAX_TIMEOUT_MS),
+    );
     const entries = await readdir(root, { withFileTypes: true });
     await Promise.all(entries.map(async (entry) => {
       if (!entry.name.startsWith("wuxr-codex-home-")) return;
       const path = join(root, entry.name);
       const metadata = await lstat(path);
       // lstat is intentional: symlinks are never followed or removed here.
-      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.mtimeMs >= cutoff) return;
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || referenced.has(path)) return;
+      const marker = await lstat(join(path, CODEX_HOME_LAST_USE_MARKER)).catch(() => undefined);
+      const lastUse = Math.max(metadata.mtimeMs, marker?.mtimeMs ?? Number.NEGATIVE_INFINITY);
+      if (lastUse >= cutoff) return;
       await rm(path, { recursive: true, force: true });
     }));
   } catch (error) {
@@ -819,10 +849,21 @@ async function pruneStaleCodexHomes(root: string): Promise<void> {
   }
 }
 
-export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<ReviewerCwd> {
+async function touchCodexHomeLastUse(home: string): Promise<void> {
+  const marker = join(home, CODEX_HOME_LAST_USE_MARKER);
+  try {
+    await utimes(marker, new Date(), new Date());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await writeFile(marker, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+  }
+}
+
+export async function prepareReviewerCwd(parentDir?: string): Promise<ReviewerCwd> {
   let createdPath: string | undefined;
   try {
-    createdPath = await mkdtemp(join(parentDir, "wuxr-reviewer-cwd-"));
+    const root = parentDir ?? await secureReviewerCwdRoot();
+    createdPath = await mkdtemp(join(root, "wuxr-reviewer-cwd-"));
     await chmod(createdPath, 0o700);
   } catch (error) {
     if (createdPath !== undefined) {
@@ -1011,6 +1052,9 @@ export function createClaudeHeadlessBackend(overrides: Partial<HeadlessBackendDe
         // Never echo it into a user-facing error; stderr or the exit code is
         // enough to diagnose the failed process safely.
         const detail = oneLine(result.stderr) || `exit ${result.code}`;
+        if (/^claude reviewer: working directory .+ was removed (?:before|during) the leg$/.test(detail)) {
+          throw new WuxReviewError(detail);
+        }
         throw new WuxReviewError(`claude reviewer: claude -p failed: ${detail}`);
       }
       const stdoutMayBeTruncated = result.stdoutTruncated
@@ -1190,6 +1234,7 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
             : undefined;
           let directStreamObserved = false;
           let result: HeadlessRunResult;
+          await home?.touchLastUse?.();
           try {
             result = await execLeg(deps, opts, {
               argv: args,
@@ -1225,6 +1270,10 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
               && error instanceof ObservableLifecycleError
               && error.state === "interrupted";
             throw error;
+          } finally {
+            await home?.touchLastUse?.().catch((touchError) => {
+              deps.warn(`codex reviewer: could not update per-leg home last-use marker: ${oneLine(errorDetail(touchError))}`);
+            });
           }
           // A timeout is the wall-clock bound doing its job; retrying only doubles
           // the wait, so surface it as a typed error immediately (never retried).

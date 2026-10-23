@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createClaudeHeadlessBackend,
   createCodexHeadlessBackend,
@@ -17,7 +17,7 @@ import {
   type HeadlessRunResult,
 } from "../../src/backends/headless";
 import { buildObservableWrapperScript } from "../../src/backends/observable";
-import { codexHomeRoot } from "../../src/backends/codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "../../src/backends/codex-home";
 import {
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
@@ -33,7 +33,7 @@ const CODEX_COMMAND = JSON.stringify({
   item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
-const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
+const REVIEWER_CWD = join(reviewerCwdRoot(), "wuxr-reviewer-cwd-test");
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
 
@@ -466,6 +466,17 @@ describe("createClaudeHeadlessBackend", () => {
     await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "claude -p failed: auth required run /login",
     );
+  });
+
+  test("names a removed private cwd instead of relaying Claude's generic cwd error", async () => {
+    const h = harness({
+      runResult: {
+        code: 125,
+        stderr: `claude reviewer: working directory ${REVIEWER_CWD} was removed during the leg`,
+      },
+    });
+    await expect(createClaudeHeadlessBackend(h.deps)("P", { sessionName: "removed-cwd", direct: true }))
+      .rejects.toThrow(`working directory ${REVIEWER_CWD} was removed during the leg`);
   });
 
   test("a failure envelope (is_error true) is a typed error with the api status", async () => {
@@ -2424,19 +2435,26 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     const root = join(state, "wux-review", "codex-homes");
     const oldHome = join(root, "wuxr-codex-home-old");
     const youngHome = join(root, "wuxr-codex-home-young");
+    const markedHome = join(root, "wuxr-codex-home-recent-marker");
     const other = join(root, "other-old");
     const outside = await mkdtemp(join(tmpdir(), "wuxr-outside-"));
     const link = join(root, "wuxr-codex-home-link");
     try {
       await mkdir(root, { recursive: true });
-      await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(other)]);
+      await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(markedHome), mkdir(other)]);
       const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
-      await Promise.all([utimes(oldHome, old, old), utimes(other, old, old)]);
+      await Bun.write(join(markedHome, ".wuxr-last-use"), "");
+      await Promise.all([
+        utimes(oldHome, old, old),
+        utimes(markedHome, old, old),
+        utimes(other, old, old),
+      ]);
       await symlink(outside, link);
       const home = await prepareIsolatedCodexHome();
       await home.cleanup();
       expect(await Bun.file(oldHome).exists()).toBe(false);
       expect((await lstat(youngHome)).isDirectory()).toBe(true);
+      expect((await lstat(markedHome)).isDirectory()).toBe(true);
       expect((await lstat(other)).isDirectory()).toBe(true);
       expect((await lstat(link)).isSymbolicLink()).toBe(true);
       expect((await lstat(outside)).isDirectory()).toBe(true);
@@ -2445,6 +2463,57 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
       else process.env.XDG_STATE_HOME = prior;
       await rm(state, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps journal-referenced homes and grows the cutoff with the configured maximum timeout", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const journalDir = "/tmp/wux-review/observable-rounds";
+    const journalPath = join(journalDir, `prune-${process.pid}-${Date.now()}.json`);
+    const priorState = process.env.XDG_STATE_HOME;
+    const priorMax = process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS;
+    process.env.XDG_STATE_HOME = state;
+    process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS = String(13 * 60 * 60 * 1000);
+    const root = join(state, "wux-review", "codex-homes");
+    const referenced = join(root, "wuxr-codex-home-referenced");
+    const timeoutProtected = join(root, "wuxr-codex-home-timeout-protected");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(referenced), mkdir(timeoutProtected), mkdir(journalDir, { recursive: true })]);
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await Promise.all([utimes(referenced, old, old), utimes(timeoutProtected, old, old)]);
+      await Bun.write(journalPath, JSON.stringify({
+        version: 1,
+        reviewId: `prune-${process.pid}`,
+        round: 1,
+        executionId: "test",
+        sessionMode: false,
+        priorStateSha256: null,
+        expected: { claudeChildName: "wuxr-prune-claude", codexChildName: "wuxr-prune-codex" },
+        ledger: { claude: [], codex: [] },
+        evidence: {
+          claude: [],
+          codex: [{
+            reviewer: "codex", childName: "wuxr-prune-codex", attempt: 1,
+            evidencePath: "/evidence", resultPath: "/result", resultId: "test",
+            promptSha256: "a".repeat(64), transientBase: "/tmp/base", cleanupDir: referenced,
+          }],
+        },
+        state: "running",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }));
+      const home = await prepareIsolatedCodexHome();
+      await home.cleanup();
+      expect((await lstat(referenced)).isDirectory()).toBe(true);
+      expect((await lstat(timeoutProtected)).isDirectory()).toBe(true);
+    } finally {
+      if (priorState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = priorState;
+      if (priorMax === undefined) delete process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS;
+      else process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS = priorMax;
+      await rm(journalPath, { force: true });
+      await rm(state, { recursive: true, force: true });
     }
   });
 
@@ -2695,6 +2764,22 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
 });
 
 describe("prepareReviewerCwd (real fs)", () => {
+  test("creates Claude cwd under the shared state root rather than tmpdir", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const cwd = await prepareReviewerCwd();
+      expect(cwd.path).toStartWith(`${join(state, "wux-review", "reviewer-cwds")}/wuxr-reviewer-cwd-`);
+      expect((await stat(dirname(cwd.path))).mode & 0o777).toBe(0o700);
+      await cwd.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
   test("creates a unique mode-0700 directory per leg and removes each on teardown", async () => {
     const first = await prepareReviewerCwd();
     const second = await prepareReviewerCwd();

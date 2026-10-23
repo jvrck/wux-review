@@ -238,6 +238,39 @@ export interface ObservableRoundStore {
   prune(now?: Date): Promise<void>;
 }
 
+// Read-only pruning support. A Codex home named by an in-flight journal must
+// survive even if its last-use marker is old; the journal is the durable owner
+// after an observable parent has exited. Deliberately do not acquire a recovery
+// lock or promote a temporary journal here: pruning is hygiene, not recovery.
+export async function activeObservableCleanupDirs(): Promise<Set<string>> {
+  const deps = defaultDeps();
+  const dirs = new Set<string>();
+  for (const name of await deps.list(deps.stateDir)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.json(?:\.tmp)?$/.test(name)) continue;
+    const raw = await deps.readFile(`${deps.stateDir}/${name}`);
+    if (raw === undefined) continue;
+    let parsed: ReturnType<typeof roundSchema.safeParse>;
+    try {
+      parsed = roundSchema.safeParse(JSON.parse(raw));
+    } catch {
+      continue;
+    }
+    if (!parsed.success) continue;
+    const record = parsed.data;
+    if (isTerminalRound(record) && record.cleanupPending !== true) continue;
+    for (const reviewer of ["claude", "codex"] as const) {
+      for (const evidence of record.evidence[reviewer]) {
+        if (evidence.cleanupDir !== undefined) dirs.add(evidence.cleanupDir);
+      }
+    }
+  }
+  return dirs;
+}
+
+function isTerminalRound(record: Pick<ObservableRoundRecord, "state">): boolean {
+  return ["completed", "failed", "timed_out", "tainted", "reconciled"].includes(record.state);
+}
+
 export interface ObservableRoundEndSessionSnapshot {
   record: ObservableRoundRecord | undefined;
   temporaryRecord?: ObservableRoundRecord;

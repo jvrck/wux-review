@@ -15,7 +15,7 @@ import {
   type ObservableLegInput,
   type ObservableRunOptions,
 } from "../../src/backends/observable";
-import { codexHomeRoot } from "../../src/backends/codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "../../src/backends/codex-home";
 import { REVIEWER_STDERR_TAIL_BYTES } from "../../src/backends/capture-limits";
 import {
   MACHINE_EVENT_READ_CHUNK_BYTES,
@@ -29,12 +29,15 @@ const CLAUDE_STREAM = JSON.stringify({
   result: REPORT,
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
+const REVIEWER_CWD_ROOT = reviewerCwdRoot();
 
 test("validateObservableCleanup accepts only expected Codex home shapes", () => {
   const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
   const cwd = join(home, "wuxr-reviewer-cwd-def");
+  const claudeCwd = join(REVIEWER_CWD_ROOT, "wuxr-reviewer-cwd-def");
   expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
   expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], claudeCwd, "/tmp/adapter")).not.toThrow();
   for (const unsafe of [
     "/",
     "relative",
