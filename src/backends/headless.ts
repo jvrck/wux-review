@@ -830,9 +830,13 @@ async function assertSecureStateDirectory(path: string): Promise<void> {
 }
 
 function staleCutoff(): number {
+  const maxTimeout = Math.max(
+    envInt("WUX_REVIEW_CODEX_MAX_TIMEOUT_MS", DEFAULT_CODEX_MAX_TIMEOUT_MS),
+    envInt("WUX_REVIEW_CLAUDE_MAX_TIMEOUT_MS", DEFAULT_CLAUDE_MAX_TIMEOUT_MS),
+  );
   return Date.now() - Math.max(
     24 * 60 * 60 * 1000,
-    2 * envInt("WUX_REVIEW_CODEX_MAX_TIMEOUT_MS", DEFAULT_CODEX_MAX_TIMEOUT_MS),
+    2 * maxTimeout,
   );
 }
 
@@ -852,20 +856,37 @@ async function pruneStaleCodexHomes(
       if (!metadata.isDirectory() || metadata.isSymbolicLink() || referenced.has(path)) return;
       const markerPath = codexHomeLastUseMarker(root, path);
       const marker = await lstat(markerPath).catch(() => undefined);
-      const lastUse = Math.max(
-        metadata.mtimeMs,
+      // A real parent-owned marker is authoritative. A legacy unmarked home
+      // falls back to its directory mtime; clamp either source so a reviewer
+      // cannot retain abandoned state indefinitely by writing a future time.
+      const lastUse = Math.min(
         marker?.isFile() === true && !marker.isSymbolicLink()
           ? marker.mtimeMs
-          : Number.NEGATIVE_INFINITY,
+          : metadata.mtimeMs,
+        Date.now(),
       );
       if (lastUse >= cutoff) return;
       await rm(path, { recursive: true, force: true });
       await rm(markerPath, { force: true });
     }));
+    await pruneOrphanedCodexMarkers(root, cutoff);
   } catch (error) {
     // Pruning is hygiene only. A valid new isolated home is more important than
     // deleting an old one, so failure remains visible but never blocks a leg.
     process.stderr.write(`codex reviewer: stale-home pruning failed: ${oneLine(errorDetail(error))}\n`);
+  }
+}
+
+async function pruneOrphanedCodexMarkers(root: string, cutoff: number): Promise<void> {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.name.startsWith("wuxr-codex-home-") || !entry.name.endsWith(CODEX_HOME_LAST_USE_SUFFIX)) continue;
+    const markerPath = join(root, entry.name);
+    const marker = await lstat(markerPath);
+    if (!marker.isFile() || marker.isSymbolicLink() || Math.min(marker.mtimeMs, Date.now()) >= cutoff) continue;
+    const homeName = entry.name.slice(0, -CODEX_HOME_LAST_USE_SUFFIX.length);
+    const home = await lstat(join(root, homeName)).catch(() => undefined);
+    if (home !== undefined) continue;
+    await rm(markerPath, { force: true });
   }
 }
 
@@ -875,12 +896,18 @@ function codexHomeLastUseMarker(root: string, home: string): string {
 
 async function touchCodexHomeLastUse(root: string, home: string): Promise<void> {
   const marker = codexHomeLastUseMarker(root, home);
-  try {
-    await utimes(marker, new Date(), new Date());
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  const metadata = await lstat(marker).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (metadata === undefined) {
     await writeFile(marker, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return;
   }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("last-use marker is not a regular file");
+  }
+  await utimes(marker, new Date(), new Date());
 }
 
 export async function prepareReviewerCwd(parentDir?: string): Promise<ReviewerCwd> {

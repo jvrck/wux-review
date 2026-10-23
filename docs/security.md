@@ -16,7 +16,8 @@ last-use marker sits beside each home under the `codex-homes` root, rather than
 inside the child-writable home. A best-effort prune at the next Codex-leg start
 removes only an abandoned real own-prefix home: its last-use marker (or, for a
 pre-marker home, directory mtime) must be older than
-the larger of 24 hours and twice the configured Codex maximum timeout, and no
+the larger of 24 hours and twice the larger configured reviewer maximum timeout,
+and no
 in-flight or cleanup-pending observable round may name it. This location is
 outside the system temporary directory so Codex 0.162+ can create its read-only
 sandbox helpers.

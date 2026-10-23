@@ -3,6 +3,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildObservableWrapperScript,
   defaultObservableDeps,
   discardObservableLeg,
   discardPreparedObservableLeg,
@@ -50,6 +51,19 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
       "unsafe observable cleanup directory",
     );
   }
+});
+
+test("observable cleanup removes the exact sibling Codex last-use marker", () => {
+  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-marker");
+  const script = buildObservableWrapperScript({
+    argsPath: "/tmp/args",
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    donePath: "/tmp/done",
+    readyPath: "/tmp/ready",
+    cleanupDir: home,
+  });
+  expect(script).toContain(`rm -f -- '${join(CODEX_HOME_ROOT, "wuxr-codex-home-marker.wuxr-last-use")}'`);
 });
 
 interface HarnessOptions {

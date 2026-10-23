@@ -638,7 +638,12 @@ export function buildObservableWrapperScript(paths: {
         ...(paths.cleanupFiles ?? []).map((path) => `  ${helper} rm -f -- ${shq(path)}`),
         ...(paths.cleanupDir === undefined
           ? []
-          : [`  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`]),
+          : [
+              `  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
+              ...(codexHomeMarkerForCleanup(paths.cleanupDir) === undefined
+                ? []
+                : [`  ${helper} rm -f -- ${shq(codexHomeMarkerForCleanup(paths.cleanupDir)!)}`]),
+            ]),
         "}",
         "trap __cleanup_observable EXIT",
       ];
@@ -748,6 +753,13 @@ export function buildObservableWrapperScript(paths: {
     ...release,
     "",
   ].join("\n");
+}
+
+function codexHomeMarkerForCleanup(dir: string): string | undefined {
+  const root = resolve(codexHomeRoot());
+  const candidate = resolve(dir);
+  if (dirname(candidate) !== root || !basename(candidate).startsWith("wuxr-codex-home-")) return undefined;
+  return join(root, `${basename(candidate)}.wuxr-last-use`);
 }
 
 export async function runObservableLeg(
