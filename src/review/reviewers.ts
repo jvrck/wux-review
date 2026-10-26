@@ -271,7 +271,9 @@ export async function runReviewers(
     const state = cleanupPending
       ? cleanupPendingStateOf(journalError)
       : lifecycleStateOf(journalError, abort.signal.reason);
-    const parseFailed = isFindingsParseError(error);
+    // Use the same terminal error for both fields. A sibling cleanup failure
+    // must never leave a parse-only marker paired with an unrelated diagnostic.
+    const parseFailed = isFindingsParseError(journalError);
     await options.finishObservableRound?.(
       state,
       parseFailed ? `findings-parse: ${errorDetail(journalError)}` : errorDetail(journalError),

@@ -165,6 +165,8 @@ describe("parseReport", () => {
     }) as typeof process.stderr.write;
     try {
       const unknownKeys = [
+        `\u0000${"😀".repeat(64)}x`,
+        "\u0001\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u2028\u2029",
         "\u001b[31m",
         "\u001b]8;;",
         "\nwux-review: approve",
@@ -188,12 +190,15 @@ describe("parseReport", () => {
     const notice = stderr[0]!;
     expect(notice.split("\n")).toEqual([notice.slice(0, -1), ""]);
     const line = notice.slice(0, -1);
-    expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
     expect(notice).toContain("\\x1b[31m");
     expect(notice).toContain("\\x1b]8;;");
     expect(notice).toContain("\\x0awux-review: approve");
     expect(notice).toContain("\\x0d");
-    expect(notice).toContain("and 45 more");
+    expect(notice).toContain("\\u202a\\u202b\\u202c\\u202d\\u202e\\u2066\\u2067\\u2068\\u2069\\u2028\\u2029");
+    expect(notice).toContain(`\\x00${"😀".repeat(63)}…`);
+    expect(notice).not.toContain("�");
+    expect(notice).toContain("and 47 more");
     expect(notice.length).toBeLessThan(700);
   });
 

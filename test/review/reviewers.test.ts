@@ -287,6 +287,37 @@ describe("runReviewers", () => {
     }]);
   });
 
+  test("does not pair a parse marker with a sibling cleanup diagnostic", async () => {
+    const terminal: Array<{ diagnostic?: string; cleanupPending?: boolean; parseFailed?: boolean }> = [];
+    const sibling: Backend = async (_prompt, opts) => {
+      await new Promise<void>((resolve) => {
+        opts.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      throw new ObservableLifecycleError(
+        "codex terminal cleanup failed",
+        "failed",
+        "/evidence/codex",
+        true,
+      );
+    };
+    await expect(runReviewers(DIFF, DEFAULT_LENSES, {
+      backends: {
+        claude: async () => report([{ lens: "correctness", file: "x.ts", line: 1, severity: "blocker", finding: "bad" }]),
+        codex: sibling,
+      },
+      direct: false,
+      observableExecutionId: "parsecleanup",
+      finishObservableRound: async (_state, diagnostic, cleanupPending, parseFailed) => {
+        terminal.push({ diagnostic, cleanupPending, parseFailed });
+      },
+    })).rejects.toThrow("invalid findings object");
+    expect(terminal).toEqual([{
+      diagnostic: "codex terminal cleanup failed",
+      cleanupPending: true,
+      parseFailed: false,
+    }]);
+  });
+
   test("a terminal journal failure never masks the primary observable leg error", async () => {
     await expect(runReviewers(DIFF, DEFAULT_LENSES, {
       backends: {

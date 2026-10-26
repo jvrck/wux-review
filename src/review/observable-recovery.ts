@@ -58,6 +58,12 @@ export interface TerminalCleanupOutcome {
 
 export type ReconcileOutcome = VerdictEnvelope | TerminalCleanupOutcome;
 
+// The 2026.10.19 parser failed before it could journal `parseFailed`. Its only
+// parseReport failures had these exact reviewer-prefixed forms. Accepting only
+// this anchored legacy grammar preserves fail-closed recovery for every other
+// terminal failure.
+const legacyParseFailureDiagnostic = /^(?:claude|codex) reviewer returned (?:no JSON findings block|invalid JSON: .+|an invalid findings object: .+)$/;
+
 export async function reconcileReview(
   reviewId: string,
   overrides: Partial<ObservableRecoveryDeps> = {},
@@ -90,7 +96,7 @@ async function reconcileReviewLocked(
   };
   const terminalState = record.state;
   const recoverableParseFailure = terminalState === "failed"
-    && record.parseFailed === true
+    && (record.parseFailed === true || isLegacyParseFailure(record))
     && record.cleanupPending !== true;
   if (
     terminalState === "tainted"
@@ -264,6 +270,12 @@ async function reconcileReviewLocked(
     }).catch(() => undefined);
     throw terminalError;
   }
+}
+
+function isLegacyParseFailure(record: ObservableRoundRecord): boolean {
+  return record.parseFailed === undefined
+    && record.diagnostic !== undefined
+    && legacyParseFailureDiagnostic.test(record.diagnostic);
 }
 
 async function loadReliableRecoverySession(

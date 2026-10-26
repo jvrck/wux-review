@@ -22,6 +22,8 @@ const findingSchema = z
   })
   .strict();
 
+// Normalization removes known harmless variations first; strict validation is
+// the backstop that keeps every verdict-bearing field fail-closed.
 const reportSchema = z.object({ findings: z.array(findingSchema) }).strict();
 
 const findingKeys = new Set(["lens", "file", "line", "severity", "finding", "repro"]);
@@ -194,13 +196,24 @@ function normalizeReport(reviewer: ReviewerName, data: unknown): unknown {
   }
 
   if (ignoredReportKeys.length > 0 || ignoredFindingKeys.size > 0) {
+    const findingNames = [...ignoredFindingKeys].sort();
+    const reportNames = [...new Set(ignoredReportKeys)].sort();
+    const shownFindings = findingNames.slice(0, MAX_IGNORED_KEY_NAMES);
+    const shownReports = reportNames.slice(
+      0,
+      MAX_IGNORED_KEY_NAMES - shownFindings.length,
+    );
+    const shownCount = shownFindings.length + shownReports.length;
     const details = [
-      ...(ignoredFindingKeys.size === 0
+      ...(shownFindings.length === 0
         ? []
-        : [`ignored unknown finding keys: ${formatIgnoredKeyNames(ignoredFindingKeys)}`]),
-      ...(ignoredReportKeys.length === 0
+        : [`ignored unknown finding keys: ${formatIgnoredKeyNames(shownFindings)}`]),
+      ...(shownReports.length === 0
         ? []
-        : [`ignored unknown report keys: ${formatIgnoredKeyNames(ignoredReportKeys)}`]),
+        : [`ignored unknown report keys: ${formatIgnoredKeyNames(shownReports)}`]),
+      ...(findingNames.length + reportNames.length === shownCount
+        ? []
+        : [`and ${findingNames.length + reportNames.length - shownCount} more`]),
     ];
     process.stderr.write(`wux-review: ${formatNoticeText(reviewer)}: ${details.join("; ")}\n`);
   }
@@ -211,24 +224,21 @@ function normalizeReport(reviewer: ReviewerName, data: unknown): unknown {
 // inject terminal controls, forge another stderr line, or produce unbounded log
 // records. The reviewer label is a fixed internal union, but uses the same
 // formatter so this boundary remains safe if the parser is called directly.
-function formatIgnoredKeyNames(keys: Iterable<string>): string {
-  const names = [...new Set(keys)].sort();
-  const listed = names
-    .slice(0, MAX_IGNORED_KEY_NAMES)
-    .map((name) => formatNoticeText(name))
-    .join(", ");
-  return names.length > MAX_IGNORED_KEY_NAMES
-    ? `${listed} and ${names.length - MAX_IGNORED_KEY_NAMES} more`
-    : listed;
+function formatIgnoredKeyNames(names: string[]): string {
+  return names.map((name) => formatNoticeText(name)).join(", ");
 }
 
 function formatNoticeText(value: string): string {
-  const truncated = value.length > MAX_IGNORED_KEY_NAME_LENGTH
-    ? `${value.slice(0, MAX_IGNORED_KEY_NAME_LENGTH)}…`
+  const codePoints = [...value];
+  const truncated = codePoints.length > MAX_IGNORED_KEY_NAME_LENGTH
+    ? `${codePoints.slice(0, MAX_IGNORED_KEY_NAME_LENGTH).join("")}…`
     : value;
-  return truncated.replace(/[\u0000-\u001f\u007f-\u009f]/g, (control) =>
-    `\\x${control.charCodeAt(0).toString(16).padStart(2, "0")}`,
-  );
+  return truncated.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, (control) => {
+    const codePoint = control.codePointAt(0)!;
+    return codePoint <= 0xff
+      ? `\\x${codePoint.toString(16).padStart(2, "0")}`
+      : `\\u${codePoint.toString(16).padStart(4, "0")}`;
+  });
 }
 
 function normalizeFinding(value: unknown, ignoredKeys: Set<string>): unknown {
