@@ -61,6 +61,16 @@ only after every child is stopped or confirmed gone. A stop failure leaves both
 records in place for retry. If the journal describes an in-progress round, use
 `wux-review reconcile <id>` first; end-session will not stop it mid-round.
 
+## Reviewer findings contract
+
+Reviewer reports must contain a `findings` array. Each finding requires a
+non-empty `lens` and `finding`, plus a `severity` of `must-fix`, `nice-fix`, or
+`nit`. `file: null` (or an omitted `file`) is normalized to a general finding,
+and `repro: null` is treated as absent. Unknown report or finding keys are
+dropped with a stderr notice naming the keys and reviewer; their values are not
+kept. Missing JSON, invalid JSON, a missing findings array, and invalid verdict
+fields still fail the reviewer leg.
+
 ## Refuting a finding
 
 `--refutations <file>` is session-scoped: pass it with `--session <id>` on a

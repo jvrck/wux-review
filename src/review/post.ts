@@ -177,7 +177,7 @@ function section(lines: string[], title: string, findings: ConsolidatedFinding[]
   lines.push("");
   lines.push(`### ${title} (${findings.length})`);
   for (const finding of findings) {
-    const where = finding.line === null ? `\`${finding.file}\`` : `\`${finding.file}:${finding.line}\``;
+    const where = finding.file === "" ? "`(general)`" : finding.line === null ? `\`${finding.file}\`` : `\`${finding.file}:${finding.line}\``;
     // A finding the refutation-ledger guard demoted for THIS leg is tagged, so a
     // human sees it was a blocker that lost its block power to the ledger — demoted,
     // not deleted; the full history stays visible (#101).

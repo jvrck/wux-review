@@ -196,6 +196,17 @@ describe("renderAgentComment", () => {
     expect(claude).toContain("No findings.");
   });
 
+  test("renders a file-less finding as general in the reviewer comment", () => {
+    const env: VerdictEnvelope = {
+      ...ENV,
+      must_fix: [],
+      nice_fix: [],
+      nits: [{ lens: "testing", file: "", line: 7, finding: "add coverage", raised_by: ["claude"] }],
+      reviewers: { claude: "approve", codex: "approve" },
+    };
+    expect(renderAgentComment(env, "claude", AT)).toContain("**[testing]** `(general)` — add coverage");
+  });
+
   test("the header line carries round, updated timestamp, and THIS leg's verdict (#100)", () => {
     const env: VerdictEnvelope = { ...ENV, round: 4 }; // claude approves, codex blocks
     expect(renderAgentComment(env, "claude", AT)).toContain(

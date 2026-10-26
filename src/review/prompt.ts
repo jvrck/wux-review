@@ -22,7 +22,14 @@ const findingSchema = z
   })
   .strict();
 
+// Normalization removes known harmless variations first; strict validation is
+// the backstop that keeps every verdict-bearing field fail-closed.
 const reportSchema = z.object({ findings: z.array(findingSchema) }).strict();
+
+const findingKeys = new Set(["lens", "file", "line", "severity", "finding", "repro"]);
+const reportKeys = new Set(["findings"]);
+const MAX_IGNORED_KEY_NAMES = 10;
+const MAX_IGNORED_KEY_NAME_LENGTH = 64;
 
 // Build the prompt fed to a reviewer. Diversity comes from the two models, so the
 // core prompt — diff + full lens set + output contract — is identical for both.
@@ -63,7 +70,7 @@ Output ONLY a single fenced JSON block (no prose before or after) of exactly thi
 }
 \`\`\`
 
-An empty "findings" array means you approve with no findings. Use the exact lens names listed above. Use null for "line" when a finding is not tied to a specific line.
+An empty "findings" array means you approve with no findings. Use the exact lens names listed above. Use null for "file" when a finding is not tied to a file, and null for "line" when a finding is not tied to a specific line.
 
 DIFF UNDER REVIEW:
 ${diff}`;
@@ -121,7 +128,7 @@ function priorFindingsSection(priorFindings?: Finding[]): string {
   // — a code reviewer must see it — so this is structural hardening of the list,
   // not a claim of full injection resistance.
   const list = priorFindings
-    .map((f) => `- [${f.severity}] ${f.line === null ? inlineText(f.file) : `${inlineText(f.file)}:${f.line}`} (${inlineText(f.lens)}) — ${inlineText(f.finding)}`)
+    .map((f) => `- [${f.severity}] ${findingLocation(f.file, f.line)} (${inlineText(f.lens)}) — ${inlineText(f.finding)}`)
     .join("\n");
   return (
     frame +
@@ -138,6 +145,12 @@ function inlineText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+function findingLocation(file: string, line: number | null): string {
+  if (file === "") return "(general)";
+  const path = inlineText(file);
+  return line === null ? path : `${path}:${line}`;
+}
+
 // Parse a reviewer's raw output into a structured result. The verdict is
 // computed (block iff any must-fix). Unparseable output is a hard error — a
 // reviewer that can't be understood is not a silent approval.
@@ -152,7 +165,7 @@ export function parseReport(reviewer: ReviewerName, raw: string): ReviewResult {
   } catch (err) {
     throw new WuxReviewError(`${reviewer} reviewer returned invalid JSON: ${(err as Error).message}`);
   }
-  const parsed = reportSchema.safeParse(data);
+  const parsed = reportSchema.safeParse(normalizeReport(reviewer, data));
   if (!parsed.success) {
     const detail = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
     throw new WuxReviewError(`${reviewer} reviewer returned an invalid findings object: ${detail}`);
@@ -160,6 +173,96 @@ export function parseReport(reviewer: ReviewerName, raw: string): ReviewResult {
   const findings: Finding[] = parsed.data.findings;
   const verdict = findings.some((f) => severityBlocks(f.severity)) ? "block" : "approve";
   return { reviewer, findings, verdict };
+}
+
+// Reviewers occasionally add display-only keys or use null for fields whose
+// absence means the same thing. Normalize only those harmless variations before
+// the strict contract validates the verdict-bearing fields. Values of unknown
+// keys are deliberately never retained or included in the diagnostic.
+function normalizeReport(reviewer: ReviewerName, data: unknown): unknown {
+  if (!isRecord(data)) return data;
+
+  const ignoredReportKeys: string[] = [];
+  const ignoredFindingKeys = new Set<string>();
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (reportKeys.has(key)) {
+      normalized[key] = key === "findings" && Array.isArray(value)
+        ? value.map((finding) => normalizeFinding(finding, ignoredFindingKeys))
+        : value;
+    } else {
+      ignoredReportKeys.push(key);
+    }
+  }
+
+  if (ignoredReportKeys.length > 0 || ignoredFindingKeys.size > 0) {
+    const findingNames = [...ignoredFindingKeys].sort();
+    const reportNames = [...new Set(ignoredReportKeys)].sort();
+    const shownFindings = findingNames.slice(0, MAX_IGNORED_KEY_NAMES);
+    const shownReports = reportNames.slice(
+      0,
+      MAX_IGNORED_KEY_NAMES - shownFindings.length,
+    );
+    const shownCount = shownFindings.length + shownReports.length;
+    const details = [
+      ...(shownFindings.length === 0
+        ? []
+        : [`ignored unknown finding keys: ${formatIgnoredKeyNames(shownFindings)}`]),
+      ...(shownReports.length === 0
+        ? []
+        : [`ignored unknown report keys: ${formatIgnoredKeyNames(shownReports)}`]),
+      ...(findingNames.length + reportNames.length === shownCount
+        ? []
+        : [`and ${findingNames.length + reportNames.length - shownCount} more`]),
+    ];
+    process.stderr.write(`wux-review: ${formatNoticeText(reviewer)}: ${details.join("; ")}\n`);
+  }
+  return normalized;
+}
+
+// Keys are model output. Keep diagnostics useful without permitting a model to
+// inject terminal controls, forge another stderr line, or produce unbounded log
+// records. The reviewer label is a fixed internal union, but uses the same
+// formatter so this boundary remains safe if the parser is called directly.
+function formatIgnoredKeyNames(names: string[]): string {
+  return names.map((name) => formatNoticeText(name)).join(", ");
+}
+
+function formatNoticeText(value: string): string {
+  const codePoints = [...value];
+  const truncated = codePoints.length > MAX_IGNORED_KEY_NAME_LENGTH
+    ? `${codePoints.slice(0, MAX_IGNORED_KEY_NAME_LENGTH).join("")}…`
+    : value;
+  return truncated.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, (control) => {
+    const codePoint = control.codePointAt(0)!;
+    return codePoint <= 0xff
+      ? `\\x${codePoint.toString(16).padStart(2, "0")}`
+      : `\\u${codePoint.toString(16).padStart(4, "0")}`;
+  });
+}
+
+function normalizeFinding(value: unknown, ignoredKeys: Set<string>): unknown {
+  if (!isRecord(value)) return value;
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(value)) {
+    if (findingKeys.has(key)) {
+      normalized[key] = field;
+    } else {
+      ignoredKeys.add(key);
+    }
+  }
+  if (normalized.file === null || !("file" in normalized)) {
+    normalized.file = "";
+  }
+  if (normalized.repro === null) {
+    delete normalized.repro;
+  }
+  return normalized;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function severityBlocks(severity: Severity): boolean {
