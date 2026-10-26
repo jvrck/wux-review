@@ -267,6 +267,26 @@ describe("runReviewers", () => {
     expect(states).toEqual(["failed"]);
   });
 
+  test("journals a completed leg's findings parse failure for recovery", async () => {
+    const terminal: Array<{ state: string; diagnostic?: string; parseFailed?: boolean }> = [];
+    await expect(runReviewers(DIFF, DEFAULT_LENSES, {
+      backends: {
+        claude: async () => report([{ lens: "correctness", file: "x.ts", line: 1, severity: "blocker", finding: "bad" }]),
+        codex: async () => APPROVE,
+      },
+      direct: false,
+      observableExecutionId: "parsefailed",
+      finishObservableRound: async (state, diagnostic, _cleanupPending, parseFailed) => {
+        terminal.push({ state, diagnostic, parseFailed });
+      },
+    })).rejects.toThrow("invalid findings object");
+    expect(terminal).toEqual([{
+      state: "failed",
+      diagnostic: expect.stringContaining("findings-parse: claude reviewer returned an invalid findings object"),
+      parseFailed: true,
+    }]);
+  });
+
   test("a terminal journal failure never masks the primary observable leg error", async () => {
     await expect(runReviewers(DIFF, DEFAULT_LENSES, {
       backends: {

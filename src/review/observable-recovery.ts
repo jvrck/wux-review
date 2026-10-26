@@ -89,9 +89,12 @@ async function reconcileReviewLocked(
     run,
   };
   const terminalState = record.state;
+  const recoverableParseFailure = terminalState === "failed"
+    && record.parseFailed === true
+    && record.cleanupPending !== true;
   if (
     terminalState === "tainted"
-    || terminalState === "failed"
+    || (terminalState === "failed" && !recoverableParseFailure)
     || terminalState === "timed_out"
   ) {
     let terminalDiagnostic = record.diagnostic;

@@ -16,6 +16,7 @@ describe("buildReviewerPrompt", () => {
     }
     expect(prompt).toContain('"findings"');
     expect(prompt).toContain("must-fix");
+    expect(prompt).toContain('Use null for "file" when a finding is not tied to a file');
     expect(prompt).toContain("treat the current diff as authoritative");
     expect(prompt).toContain("Do not repeat prior-round findings");
   });
@@ -39,11 +40,13 @@ describe("buildReviewerPrompt", () => {
     const prior: Finding[] = [
       { lens: "correctness", file: "app.ts", line: 10, severity: "must-fix", finding: "unbounded loop" },
       { lens: "clarity", file: "y.ts", line: null, severity: "nit", finding: "rename foo" },
+      { lens: "testing", file: "", line: 9, severity: "nit", finding: "general note" },
     ];
     const prompt = buildReviewerPrompt("diff", DEFAULT_LENSES, prior);
     expect(prompt).toContain("In the previous round you reported these findings");
     expect(prompt).toContain("[must-fix] app.ts:10 (correctness) — unbounded loop");
     expect(prompt).toContain("[nit] y.ts (clarity) — rename foo"); // null line → file only
+    expect(prompt).toContain("[nit] (general) (testing) — general note");
     expect(prompt).toContain("a finding that was resolved must NOT reappear");
   });
 
@@ -126,6 +129,74 @@ describe("parseReport", () => {
     expect(result.findings[1]!.repro).toBeUndefined();
   });
 
+  test("normalizes nullable general fields and drops unknown keys with one leg warning", () => {
+    const stderr: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      stderr.push(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const result = parseReport("claude", fenced({
+        report_hint: "discarded",
+        findings: [
+          { lens: "correctness", file: null, line: 7, severity: "nit", finding: "general", repro: null, line_hint: "discarded" },
+          { lens: "testing", severity: "nice-fix", finding: "missing file is general", line_note: "discarded" },
+        ],
+      }));
+      expect(result.findings).toEqual([
+        { lens: "correctness", file: "", line: 7, severity: "nit", finding: "general" },
+        { lens: "testing", file: "", line: null, severity: "nice-fix", finding: "missing file is general" },
+      ]);
+    } finally {
+      process.stderr.write = write;
+    }
+    expect(stderr).toEqual([
+      "wux-review: claude: ignored unknown finding keys: line_hint, line_note; ignored unknown report keys: report_hint\n",
+    ]);
+  });
+
+  test("bounds and sanitizes hostile unknown key names in one stderr line", () => {
+    const stderr: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      stderr.push(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const unknownKeys = [
+        "\u001b[31m",
+        "\u001b]8;;",
+        "\nwux-review: approve",
+        "\r",
+        "x".repeat(10_000),
+        ...Array.from({ length: 50 }, (_, index) => `unknown-key-${index}`),
+      ];
+      const finding = Object.fromEntries([
+        ["lens", "correctness"],
+        ["file", "x.ts"],
+        ["line", 1],
+        ["severity", "nit"],
+        ["finding", "note"],
+        ...unknownKeys.map((key) => [key, "discarded"]),
+      ]);
+      expect(parseReport("claude", fenced({ findings: [finding] })).verdict).toBe("approve");
+    } finally {
+      process.stderr.write = write;
+    }
+    expect(stderr).toHaveLength(1);
+    const notice = stderr[0]!;
+    expect(notice.split("\n")).toEqual([notice.slice(0, -1), ""]);
+    const line = notice.slice(0, -1);
+    expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(notice).toContain("\\x1b[31m");
+    expect(notice).toContain("\\x1b]8;;");
+    expect(notice).toContain("\\x0awux-review: approve");
+    expect(notice).toContain("\\x0d");
+    expect(notice).toContain("and 45 more");
+    expect(notice.length).toBeLessThan(700);
+  });
+
   test("missing line defaults to null", () => {
     const result = parseReport("claude", fenced({ findings: [{ lens: "correctness", file: "x", severity: "nit", finding: "z" }] }));
     expect(result.findings[0]!.line).toBeNull();
@@ -184,6 +255,9 @@ describe("parseReport", () => {
     expect(() => parseReport("claude", "```json\n{not json}\n```")).toThrow("invalid JSON");
     expect(() =>
       parseReport("claude", fenced({ findings: [{ lens: "x", file: "f", line: 1, severity: "blocker", finding: "z" }] })),
+    ).toThrow("invalid findings object");
+    expect(() =>
+      parseReport("claude", fenced({ findings: [{ lens: "x", file: "f", line: 1, severity: "nit", finding: "" }] })),
     ).toThrow("invalid findings object");
   });
 });

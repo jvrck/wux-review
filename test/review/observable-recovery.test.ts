@@ -576,6 +576,40 @@ describe("observable parent recovery", () => {
     }
   });
 
+  test("reconciles a failed findings-parse round from existing evidence", async () => {
+    const h = recoveryHarness({
+      mutateRecord: (record) => {
+        record.state = "failed";
+        record.parseFailed = true;
+        record.diagnostic = "findings-parse: claude reviewer returned an invalid findings object";
+      },
+    });
+    await expect(reconcileReview(h.reviewId, {
+      roundStore: h.roundStore,
+      sessionStore: h.sessionStore,
+      run: h.run,
+      observable: h.observable,
+    })).resolves.toMatchObject({ verdict: "approve", round: 1 });
+    expect(h.calls.every((call) => call.cmd[0] === "wux")).toBe(true);
+    expect(h.round.state).toBe("reconciled");
+  });
+
+  test("refuses an ordinary failed round without the findings-parse marker", async () => {
+    const h = recoveryHarness({
+      mutateRecord: (record) => {
+        record.state = "failed";
+        record.diagnostic = "reviewer process exited 1";
+      },
+    });
+    await expect(reconcileReview(h.reviewId, {
+      roundStore: h.roundStore,
+      sessionStore: h.sessionStore,
+      run: h.run,
+      observable: h.observable,
+    })).rejects.toThrow("is failed and cannot be reconciled");
+    expect(h.calls).toHaveLength(0);
+  });
+
   test("retries a round after one finished leg was reconciled before its sibling exited", async () => {
     const h = recoveryHarness({ liveReviewer: "codex" });
     await expect(reconcileReview(h.reviewId, {

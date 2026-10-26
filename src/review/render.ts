@@ -45,7 +45,7 @@ function section(lines: string[], title: string, findings: ConsolidatedFinding[]
   lines.push("");
   lines.push(`${title} (${findings.length})`);
   for (const finding of findings) {
-    const where = finding.line === null ? finding.file : `${finding.file}:${finding.line}`;
+    const where = finding.file === "" ? "(general)" : finding.line === null ? finding.file : `${finding.file}:${finding.line}`;
     // A demoted-after-refutation finding is tagged so the operator sees it was a
     // blocker that lost its block power to the ledger, not a plain advisory — but
     // only in the advisory buckets (a still-blocking must-fix is never tagged).

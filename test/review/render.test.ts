@@ -82,6 +82,14 @@ describe("renderHuman", () => {
     expect(out).toContain("[clarity] y.ts — rename (raised by claude, codex)"); // null line -> file only
   });
 
+  test("renders a file-less finding as general even when it has a line", () => {
+    const env: VerdictEnvelope = {
+      ...approveEnv,
+      nits: [{ lens: "testing", file: "", line: 7, finding: "add coverage", raised_by: ["claude"] }],
+    };
+    expect(renderHuman(env)).toContain("[testing] (general) — add coverage");
+  });
+
   test("surfaces a finding's runnable repro in the human view but keeps it off --json (#101)", () => {
     const env: VerdictEnvelope = {
       ...blockEnv,
