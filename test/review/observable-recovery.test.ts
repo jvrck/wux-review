@@ -407,6 +407,11 @@ function recoveryHarness(options: {
   const observable = {
     tmpDir: "/tmp/recovery",
     mkdir: async () => {},
+    lstat: async () => ({
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+    }),
     rm: async (path: string) => {
       if (
         transientCleanupFailures > 0
@@ -1206,6 +1211,21 @@ describe("observable parent recovery", () => {
     })).resolves.toMatchObject({ verdict: "approve" });
     expect(h.files.has(promptPath)).toBe(false);
     expect(h.files.has(outputPath)).toBe(false);
+    expect(h.files.has(cleanupDir)).toBe(false);
+  });
+
+  test("reconciles and cleans a previous-release temporary Claude cwd", async () => {
+    const h = recoveryHarness();
+    const cleanupDir = join(tmpdir(), "wuxr-reviewer-cwd-legacy");
+    Object.assign(h.evidence.claude, { cleanupDir });
+    Object.assign(h.round.evidence.claude[0]!, { cleanupDir });
+    h.files.set(cleanupDir, "legacy reviewer cwd");
+    await expect(reconcileReview(h.reviewId, {
+      roundStore: h.roundStore,
+      sessionStore: h.sessionStore,
+      run: h.run,
+      observable: h.observable,
+    })).resolves.toMatchObject({ verdict: "approve" });
     expect(h.files.has(cleanupDir)).toBe(false);
   });
 

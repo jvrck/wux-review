@@ -25,7 +25,9 @@ sandbox helpers.
 Claude receives a separately created, empty mode-`0700` cwd under
 `${XDG_STATE_HOME:-~/.local/state}/wux-review/reviewer-cwds/`. It is removed by
 its owning leg after normal completion, or by durable observable reconciliation
-after an interrupted parent; it is never created under the system temp directory.
+after an interrupted parent. At the next reviewer-leg start, unreferenced stale
+reviewer cwds older than the timeout-aware cutoff are also pruned. It is never
+created under the system temp directory.
 
 Codex evidence is fail-closed in both direct and observable execution. An
 `error` or `turn.failed` machine event, a sandbox-start failure, an unclassified

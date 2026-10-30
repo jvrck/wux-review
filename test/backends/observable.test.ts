@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
   discardPreparedObservableLeg,
   OBSERVABLE_DRAIN_READS_PER_PASS,
   ObservableLifecycleError,
+  removeObservableCleanupDir,
   runObservableLeg,
   scheduleFileRemoval,
   validateObservableCleanup,
@@ -36,9 +37,11 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
   const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
   const cwd = join(home, "wuxr-reviewer-cwd-def");
   const claudeCwd = join(REVIEWER_CWD_ROOT, "wuxr-reviewer-cwd-def");
+  const legacyClaudeCwd = join(tmpdir(), "wuxr-reviewer-cwd-legacy");
   expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
   expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
   expect(() => validateObservableCleanup([], claudeCwd, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], legacyClaudeCwd, "/tmp/adapter")).not.toThrow();
   for (const unsafe of [
     "/",
     "relative",
@@ -46,10 +49,35 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
     join(CODEX_HOME_ROOT, "wrong-name"),
     join(tmpdir(), "wuxr-codex-home-old-location"),
     join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
+    `${tmpdir()}/nested/wuxr-reviewer-cwd-legacy`,
+    join(tmpdir(), "wrong-reviewer-cwd-legacy"),
+    `${tmpdir()}/nested/../wuxr-reviewer-cwd-legacy`,
   ]) {
     expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(
       "unsafe observable cleanup directory",
     );
+  }
+});
+
+test("legacy reviewer-cwd cleanup unlinks a symlink without touching its target", async () => {
+  const legacy = join(tmpdir(), `wuxr-reviewer-cwd-legacy-${process.pid}-${Date.now()}`);
+  const outside = await mkdtemp(join(tmpdir(), "wuxr-outside-"));
+  const target = join(outside, "target");
+  try {
+    await writeFile(target, "outside");
+    await symlink(target, legacy);
+    const deps = defaultObservableDeps(async () => ({
+      code: 0,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+    }));
+    await removeObservableCleanupDir(deps, legacy);
+    await expect(lstat(legacy)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await Bun.file(target).text()).toBe("outside");
+  } finally {
+    await rm(legacy, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
   }
 });
 

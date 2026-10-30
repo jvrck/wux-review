@@ -861,10 +861,19 @@ async function pruneStaleCodexHomes(
       // cannot retain abandoned state indefinitely by writing a future time.
       const validMarker = marker?.isFile() === true && !marker.isSymbolicLink();
       const lastUse = Math.min(validMarker ? marker.mtimeMs : metadata.mtimeMs, Date.now());
-      // Adopt a legacy unmarked home once. The sibling marker is parent-owned,
-      // never written inside CODEX_HOME, and fixes the first-seen timestamp so
-      // a future-dated legacy directory cannot defer pruning indefinitely.
-      if (marker === undefined) {
+      // Adopt legacy and invalid markers alike. An invalid sibling is removed
+      // with lstat-derived type information before replacement, so a child
+      // cannot pin an abandoned home with a symlink or other non-regular entry.
+      // The replacement is parent-owned, never written inside CODEX_HOME, and
+      // fixes the first-seen timestamp so a future-dated directory cannot defer
+      // pruning indefinitely.
+      if (!validMarker) {
+        if (marker !== undefined) {
+          await rm(markerPath, {
+            recursive: marker.isDirectory() && !marker.isSymbolicLink(),
+            force: true,
+          });
+        }
         await adoptLegacyCodexHomeMarker(markerPath, lastUse);
       }
       if (lastUse >= cutoff) return;
