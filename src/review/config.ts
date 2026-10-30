@@ -33,6 +33,7 @@ const configSchema = z
     lenses: z.array(z.string().min(1)).min(1, "must list at least one lens").optional(),
     extra_lenses: z.array(lensSchema).optional(),
     check: checkSchema.optional(),
+    pr_head_wait_seconds: z.number().positive().max(300).optional(),
     reviewers: z
       .object({
         claude: reviewerSchema.optional(),
@@ -52,6 +53,7 @@ export interface WuxReviewConfig {
   extraLenses?: { name: string; prompt: string }[];
   // Normalized to a command list; a bare string in the YAML becomes `[string]`.
   check?: string[];
+  prHeadWaitSeconds?: number;
   reviewers?: { claude?: ReviewerConfig; codex?: ReviewerConfig };
 }
 
@@ -79,6 +81,7 @@ export function parseConfig(text: string): WuxReviewConfig {
     lenses: data.lenses,
     extraLenses: data.extra_lenses,
     check: data.check === undefined ? undefined : Array.isArray(data.check) ? data.check : [data.check],
+    prHeadWaitSeconds: data.pr_head_wait_seconds,
     reviewers: data.reviewers,
   };
 }

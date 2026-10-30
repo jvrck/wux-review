@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { consolidate, type VerdictEnvelope } from "../../src/review/consolidate";
 import { postToPr, renderAgentComment } from "../../src/review/post";
 import type { Run, RunResult } from "../../src/runtime/exec";
@@ -17,9 +18,9 @@ const ENV: VerdictEnvelope = {
   session: "abc123",
 };
 
-// Route gh commands: repo resolution, the per-marker existing-comment lookup, and
-// the PATCH/POST writes. `existing` gives the prior comment id per reviewer (the
-// lookup picks by the marker embedded in the jq filter).
+// Route gh commands: repository/viewer lookup, historic reviewer comments, and
+// comment writes. Existing comments are encoded exactly as the jq `@base64`
+// response used by the production API call.
 function harness(existing: { claude?: string; codex?: string; legacy?: string } = {}) {
   const calls: string[][] = [];
   const run: Run = async (cmd) => {
@@ -28,6 +29,13 @@ function harness(existing: { claude?: string; codex?: string; legacy?: string } 
     if (joined.includes("gh repo view")) return ok("jvrck/wux-review\n");
     if (joined.includes("gh api user")) return ok("jvrck\n");
     if (joined.includes("--paginate")) {
+      if (joined.includes("@base64")) {
+        const comments = (["claude", "codex"] as const).flatMap((reviewer) => {
+          const body = existing[reviewer];
+          return body === undefined ? [] : [Buffer.from(JSON.stringify([reviewer === "claude" ? 111 : 222, `<!-- dual-review:${reviewer} -->\n${body}`])).toString("base64")];
+        });
+        return ok(comments.join("\n"));
+      }
       const id = joined.includes("dual-review:claude")
         ? existing.claude
         : joined.includes("dual-review:codex")
@@ -63,41 +71,27 @@ describe("postToPr", () => {
     expect(codexBody).toContain("codex: 🔴 block");
   });
 
-  test("updates each reviewer's comment in place (PATCH) when both already exist", async () => {
-    const { run, calls } = harness({ claude: "111", codex: "222" });
-    await postToPr(42, ENV, run);
+  test("posts a new pair at the next PR-derived round and points the prior pair forward", async () => {
+    const oldClaude = "<!-- dual-review:round=1 -->\n\n**Dual-review (claude) — round 1 · verdict: must-fix**\nold claude";
+    const oldCodex = "<!-- dual-review:round=1 -->\n\n**Dual-review (codex) — round 1 · verdict: must-fix**\nold codex";
+    const { run, calls } = harness({ claude: oldClaude, codex: oldCodex });
+    const results = await postToPr(42, ENV, run, () => AT);
+    expect(findAll(calls, "POST")).toHaveLength(2);
+    expect(results.every((result) => result.round === 2)).toBe(true);
+    const bodies = findAll(calls, "POST").map(bodyArg);
+    expect(bodies.every((body) => body.includes("<!-- dual-review:round=2 -->"))).toBe(true);
     const patches = findAll(calls, "PATCH");
     expect(patches).toHaveLength(2);
-    expect(patches.some((p) => p.join(" ").includes("repos/jvrck/wux-review/issues/comments/111"))).toBe(true);
-    expect(patches.some((p) => p.join(" ").includes("repos/jvrck/wux-review/issues/comments/222"))).toBe(true);
-    expect(findAll(calls, "POST")).toHaveLength(0);
-  });
-
-  test("mixes per reviewer: update the one that exists, create the one that doesn't", async () => {
-    const { run, calls } = harness({ claude: "111" });
-    await postToPr(42, ENV, run);
-    const patches = findAll(calls, "PATCH");
-    expect(patches).toHaveLength(1);
-    expect(patches[0]!.join(" ")).toContain("comments/111");
-    const posts = findAll(calls, "POST");
-    expect(posts).toHaveLength(1);
-    expect(bodyArg(posts[0]!)).toContain("<!-- dual-review:codex -->");
-  });
-
-  test("updates the most recent matching comment when a reviewer has several", async () => {
-    const { run, calls } = harness({ claude: "123\n999", codex: "55" });
-    await postToPr(42, ENV, run);
-    const patches = findAll(calls, "PATCH");
-    expect(patches.some((p) => p.join(" ").includes("comments/999"))).toBe(true); // last claude id
-    expect(patches.some((p) => p.join(" ").includes("comments/55"))).toBe(true);
+    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/111"))!)).toBe(`body=> Superseded by round 2: \n<!-- dual-review:claude -->\n${oldClaude}`);
+    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/222"))!)).toBe(`body=> Superseded by round 2: \n<!-- dual-review:codex -->\n${oldCodex}`);
   });
 
   test("scopes each lookup to our own comments (author check), without --slurp", async () => {
     const { run, calls } = harness({});
     await postToPr(42, ENV, run);
-    // three lookups: the legacy sweep + one per reviewer.
+    // Legacy sweep + one all-reviewer history lookup.
     const lookups = findAll(calls, "--paginate");
-    expect(lookups).toHaveLength(3);
+    expect(lookups).toHaveLength(2);
     for (const lookup of lookups) {
       expect(lookup.join(" ")).toContain(".user.login");
       expect(lookup).not.toContain("--slurp");
@@ -159,16 +153,11 @@ describe("postToPr", () => {
     expect(codexBody).toContain("**Dual-review (codex) — round 3 · updated 2026-07-24T12:00:00Z · verdict: must-fix**");
   });
 
-  test("a multi-round re-review keeps the comment count at 2 (upsert preserved) while the header changes", async () => {
-    // Both comments already exist → two PATCHes, zero POSTs: the count stays 2.
-    const { run, calls } = harness({ claude: "111", codex: "222" });
+  test("a session round never moves the PR round backwards", async () => {
+    const { run, calls } = harness({ claude: "<!-- dual-review:round=5 -->", codex: "<!-- dual-review:round=5 -->" });
     const results = await postToPr(42, { ...ENV, round: 4 }, run, () => AT);
-    expect(findAll(calls, "PATCH")).toHaveLength(2);
-    expect(findAll(calls, "POST")).toHaveLength(0);
-    // The header (round + updated) is what changed in place, not the count.
-    const patched = findAll(calls, "PATCH").map(bodyArg);
-    expect(patched.every((b) => b.includes("round 4 · updated 2026-07-24T12:00:00Z"))).toBe(true);
-    expect(results.every((r) => r.round === 4)).toBe(true);
+    expect(findAll(calls, "POST")).toHaveLength(2);
+    expect(results.every((result) => result.round === 6)).toBe(true);
   });
 });
 
@@ -215,6 +204,11 @@ describe("renderAgentComment", () => {
     expect(renderAgentComment(env, "codex", AT)).toContain(
       "**Dual-review (codex) — round 4 · updated 2026-07-24T12:00:00Z · verdict: must-fix**",
     );
+  });
+
+  test("the header includes the reviewed PR head when present", () => {
+    const env: VerdictEnvelope = { ...ENV, head: "0123456789abcdef0123456789abcdef01234567" };
+    expect(renderAgentComment(env, "claude", AT)).toContain("round 1 · head 0123456789ab · updated");
   });
 
   test("round defaults to 1 when the envelope carries no round (one-shot --post-to-pr)", () => {

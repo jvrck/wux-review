@@ -680,6 +680,11 @@ describe("parseReviewArgs", () => {
     }
   });
 
+  test("--expect-head is PR-only", () => {
+    expect(parseReviewArgs(["--pr", "7", "--expect-head", "abc"]).expectHead).toBe("abc");
+    expect(() => parseReviewArgs(["--expect-head", "abc"])).toThrow("requires --pr");
+  });
+
   test("treats -- as end of options (ref may then start with -)", () => {
     expect(parseReviewArgs(["--", "-weird-ref"]).ref).toBe("-weird-ref");
   });

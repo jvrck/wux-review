@@ -43,6 +43,11 @@ describe("renderJson", () => {
     expect(Object.keys(parsed)).toEqual(["verdict", "must_fix", "nice_fix", "nits", "reviewers", "session"]);
   });
 
+  test("includes the reviewed PR head as additive JSON provenance", () => {
+    const parsed = JSON.parse(renderJson({ ...blockEnv, head: "0123456789abcdef" }));
+    expect(parsed.head).toBe("0123456789abcdef");
+  });
+
   test("omits the out-of-band persistentUnproven tag from --json (#101)", () => {
     const env: VerdictEnvelope = {
       ...approveEnv,

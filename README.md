@@ -80,7 +80,7 @@ the observable default.
 
 See [docs/commands.md](docs/commands.md) for the complete command reference,
 including sessions, [the refutation protocol](docs/commands.md#refuting-a-finding),
-and PR-comment upserts.
+and per-round PR-comment history.
 
 ## Trust and data boundary
 

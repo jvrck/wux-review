@@ -56,6 +56,7 @@ Usage:
 
 Options:
   --pr <n>            Review pull request <n> instead of a local ref.
+  --expect-head <sha> Wait for this PR head before fetching its diff.
   --lenses <list>     Comma-separated lens set override (default: the v1 lens set).
   --post-to-pr <n>    Also post the consolidated findings as a comment on PR <n>.
   --session <id>      Use a stable id for the run. A re-review with the same id is
@@ -79,6 +80,7 @@ Options:
 export interface ReviewOptions {
   ref?: string;
   pr?: number;
+  expectHead?: string;
   lenses?: string[];
   postToPr?: number;
   session?: string;
@@ -217,6 +219,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       {
         ref: opts.ref,
         pr: opts.pr,
+        expectHead: opts.expectHead,
         lenses: opts.lenses,
         session: opts.session,
         direct: opts.direct,
@@ -243,15 +246,14 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       // void-returning injected stub) can never turn a successful post into a CLI
       // crash on `.length` — the signal is simply skipped.
       const posted = (await postToPr(opts.postToPr, envelope)) ?? [];
-      // Positive posted-verdict signal (#100): the per-leg comments are upserted in
-      // place, so the PR's comment count never changes to signal a fresh verdict.
       // This line names the round and both comment URLs so a driving session gets a
       // definitive "verdict posted (round N)" without polling the PR. It goes to
       // stderr, not stdout, so it never corrupts the machine-readable --json verdict.
       if (posted.length > 0) {
         const round = posted[0]!.round;
         const legs = posted.map((p) => `${p.reviewer} ${p.url}`).join(" · ");
-        process.stderr.write(`wux-review: verdict posted (round ${round}) — ${legs}\n`);
+        const head = envelope.head === undefined ? "" : `, head ${envelope.head.slice(0, 12)}`;
+        process.stderr.write(`wux-review: verdict posted (round ${round}${head}) — ${legs}\n`);
       }
     } catch (err) {
       const message = err instanceof WuxReviewError ? err.message : (err as Error).message;
@@ -305,6 +307,9 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
     switch (arg) {
       case "--pr":
         opts.pr = intValue(argv, ++i, "--pr");
+        break;
+      case "--expect-head":
+        opts.expectHead = value(argv, ++i, "--expect-head");
         break;
       case "--lenses": {
         const lenses = value(argv, ++i, "--lenses")
@@ -368,6 +373,9 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
   // A local ref and `--pr` are mutually exclusive review targets.
   if (opts.ref !== undefined && opts.pr !== undefined) {
     throw new WuxReviewError("provide either a <ref> or --pr <n>, not both");
+  }
+  if (opts.expectHead !== undefined && opts.pr === undefined) {
+    throw new WuxReviewError("--expect-head requires --pr <n>");
   }
   // A bare invocation (neither <ref> nor --pr) is the documented "working tree"
   // review target — the default mode, resolved in #4. An empty options set is

@@ -37,6 +37,9 @@ export interface VerdictEnvelope {
   nits: ConsolidatedFinding[];
   reviewers: { claude: Verdict; codex: Verdict };
   session: string;
+  // Full PR head SHA that supplied the reviewed diff. Omitted for local targets.
+  // This is intentionally included in JSON so consumers can prove provenance.
+  head?: string;
   // The 1-based round number for this review within its `--session` (#100). The
   // pipeline stamps it from the session state (round 1 on the first review of a
   // session or a one-shot; incremented each re-review). Consumed by the PR-comment

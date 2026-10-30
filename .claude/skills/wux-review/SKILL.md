@@ -16,6 +16,9 @@ wux-review <target> --json                  # e.g. wux-review --pr 42 --json
 # optionally also post the findings to the PR:
 wux-review <target> --json --post-to-pr <n>
 ```
+After pushing a PR fix, run from its checked-out branch or pass
+`--expect-head "$(git rev-parse HEAD)"`: wux-review waits for that SHA to appear
+on GitHub and records the reviewed `head` in the JSON result and PR comment.
 For a review → fix → re-review loop, pick a stable `--session <id>` up front and pass it on **every** run, including the first — that is what makes each re-review context-aware (see step 3). Use an id **unique to this review** (e.g. `<repo>-pr<n>`): ids share a per-host namespace, so a bare `<n>` could collide with another repo's loop and cross-feed its prior findings. A one-off review with no loop can omit it.
 
 `wux-review` spawns two equal, independent reviewers (Claude + Codex), feeds each the same diff and lens set, and returns one consolidated verdict:

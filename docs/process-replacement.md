@@ -97,9 +97,9 @@ The manual interactive Wux dual-review is no longer required for every PR.
   result. `--inspect` is retained as a compatibility alias.
 - **`--direct`:** bypasses Wux explicitly while preserving review and verdict
   semantics; observable failures never select it automatically.
-- **`--post-to-pr <n>`:** posts one comment per reviewer, each marker-keyed
-  (`<!-- dual-review:claude|codex -->`) so a re-review updates it in place —
-  exactly one Claude and one Codex comment per PR, no duplicate pile.
+- **`--post-to-pr <n>`:** posts a new marker-keyed Claude and Codex comment pair
+  on every round. The latest/highest-round pair is current; the pair it replaces
+  gets a one-line forward pointer, preserving the full red-to-green history.
 
 ## Replacement Bar — met
 
@@ -110,7 +110,7 @@ The manual interactive Wux dual-review is no longer required for every PR.
 | No manual-only must-fix misses | ✅ manual found 0 must-fix on all three; wux-review blocked 2 of 3 and missed none (caught ≥ manual) |
 | Blocked reviews preserve stdout/JSON, handled as review-blocked not crashed | ✅ exit 2 + JSON envelope |
 | Re-review converges (block → fix → approve) without stale findings | ✅ seeded evaluation |
-| `--post-to-pr` updates in place without duplicate piles | ✅ seeded evaluation (count stayed 2) |
+| `--post-to-pr` preserves every round's verdict history | ✅ marker-keyed pair per round with forward pointers |
 | Seeded + fake-agent smoke green on the headless legs | ✅ recorded evaluation and CI smoke |
 
 ## Earlier transport evaluation
