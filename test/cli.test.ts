@@ -681,8 +681,10 @@ describe("parseReviewArgs", () => {
   });
 
   test("--expect-head is PR-only", () => {
-    expect(parseReviewArgs(["--pr", "7", "--expect-head", "abc"]).expectHead).toBe("abc");
-    expect(() => parseReviewArgs(["--expect-head", "abc"])).toThrow("requires --pr");
+    const sha = "a".repeat(40);
+    expect(parseReviewArgs(["--pr", "7", "--expect-head", sha]).expectHead).toBe(sha);
+    expect(() => parseReviewArgs(["--expect-head", sha])).toThrow("requires --pr");
+    expect(() => parseReviewArgs(["--pr", "7", "--expect-head", "abc"])).toThrow("full 40-hex SHA");
   });
 
   test("treats -- as end of options (ref may then start with -)", () => {

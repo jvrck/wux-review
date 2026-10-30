@@ -309,7 +309,7 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
         opts.pr = intValue(argv, ++i, "--pr");
         break;
       case "--expect-head":
-        opts.expectHead = value(argv, ++i, "--expect-head");
+        opts.expectHead = shaValue(argv, ++i, "--expect-head");
         break;
       case "--lenses": {
         const lenses = value(argv, ++i, "--lenses")
@@ -420,4 +420,12 @@ function intValue(argv: string[], i: number, flag: string): number {
     throw new WuxReviewError(`${flag} requires a positive integer, got "${raw}"`);
   }
   return n;
+}
+
+function shaValue(argv: string[], i: number, flag: string): string {
+  const sha = value(argv, i, flag);
+  if (!/^[0-9a-f]{40}$/i.test(sha)) {
+    throw new WuxReviewError(`${flag} requires a full 40-hex SHA`);
+  }
+  return sha;
 }

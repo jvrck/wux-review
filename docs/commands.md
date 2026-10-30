@@ -34,7 +34,7 @@ pr_head_wait_seconds: 60
 | Flag | Meaning |
 |------|---------|
 | `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). |
-| `--expect-head <sha>` | For a PR, wait for this pushed head before fetching; fail rather than review a stale head. When omitted on the checked-out PR branch, local `HEAD` is used automatically. |
+| `--expect-head <sha>` | For a PR, wait for this pushed full 40-hex SHA before fetching; fail rather than review a stale head. When omitted on the checked-out PR branch with a matching tracked head repository, local `HEAD` is used automatically. |
 | `--lenses <list>` | Comma-separated lens-set override (default: the v1 lens set). |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |

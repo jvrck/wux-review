@@ -62,11 +62,11 @@ export async function postToPr(
     const url = await postComment(run, repo, pr, body);
     results.push({ reviewer, url, round });
   }
-  for (const comment of previous.filter((candidate) => commentRound(candidate) === previousRound || (previousRound === previous.length && commentRound(candidate) === undefined))) {
+  for (const comment of supersededComments(previous, previousRound)) {
     const replacement = results.find((result) => result.reviewer === comment.reviewer);
-    if (replacement === undefined || comment.body.startsWith("> Superseded by round ")) continue;
+    if (replacement === undefined || hasSupersededPointer(comment.body)) continue;
     try {
-      await capture(run, ["gh", "api", "-X", "PATCH", `repos/${repo}/issues/comments/${comment.id}`, "-f", `body=> Superseded by round ${round}: ${replacement.url}\n${comment.body}`]);
+      await capture(run, ["gh", "api", "-X", "PATCH", `repos/${repo}/issues/comments/${comment.id}`, "-f", `body=${withSupersededPointer(comment.body, round, replacement.url)}`]);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       process.stderr.write(`wux-review: warning: could not mark prior ${comment.reviewer} comment superseded: ${message}\n`);
@@ -132,7 +132,26 @@ function priorRound(comments: ReviewerComment[]): number {
   // Pre-round-key comments may have no usable header: then treat each historic
   // comment as one prior round. Once any recorded/header round exists, it is the
   // authoritative monotonic sequence rather than the two-comments-per-round count.
-  return known.length === 0 ? comments.length : Math.max(...known);
+  return known.length === 0 ? Math.ceil(comments.length / REVIEWERS.length) : Math.max(...known);
+}
+
+// Only the immediately previous pair changes, and only once. Earlier rounds
+// already point at the round that superseded them.
+function supersededComments(comments: ReviewerComment[], previousRound: number): ReviewerComment[] {
+  const known = comments.some((comment) => commentRound(comment) !== undefined);
+  return comments.filter((comment) => known ? commentRound(comment) === previousRound : true);
+}
+
+function hasSupersededPointer(body: string): boolean {
+  return body.split("\n", 3)[1]?.startsWith("> Superseded by round ") === true;
+}
+
+function withSupersededPointer(body: string, round: number, url: string): string {
+  const newline = body.indexOf("\n");
+  const pointer = `> Superseded by round ${round}: ${url}`;
+  // Preserve the marker as byte zero for startswith-based tooling. Other than
+  // this inserted line, the prior comment body remains byte-for-byte unchanged.
+  return newline === -1 ? `${body}\n${pointer}` : `${body.slice(0, newline + 1)}${pointer}\n${body.slice(newline + 1)}`;
 }
 
 // Always create a new comment. PATCH is reserved for the optional one-line
@@ -150,9 +169,8 @@ async function postComment(
 // the findings it raised, each bucketed by the severity THAT reviewer assigned —
 // not the consolidated max — so a reviewer is never shown an escalated severity
 // in its own comment. A finding both raised shows `raised by claude, codex`, so
-// cross-agreement stays visible in each comment. `updatedAt` (an ISO timestamp)
-// and the envelope's round drive the visible header line (#100) that makes an
-// historical comments are not rewritten when a new round is posted.
+// cross-agreement stays visible in each comment. `updatedAt` and the envelope's
+// round drive the visible header line; historical comments stay intact.
 export function renderAgentComment(envelope: VerdictEnvelope, reviewer: ReviewerName, updatedAt: string): string {
   // Walk the consolidated buckets and re-file each of this reviewer's findings
   // under its OWN severity (perReviewer), falling back to the consolidated bucket

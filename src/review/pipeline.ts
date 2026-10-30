@@ -74,6 +74,9 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   if (input.ref !== undefined && input.pr !== undefined) {
     throw new WuxReviewError("provide either a ref or pr, not both");
   }
+  if (input.expectHead !== undefined && input.pr === undefined) {
+    throw new WuxReviewError("expect_head requires pr");
+  }
   throwIfObservableReviewAborted(input);
 
   const loadConfig = deps.loadConfig ?? defaultLoadConfig;

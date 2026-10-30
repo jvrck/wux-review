@@ -82,8 +82,15 @@ describe("postToPr", () => {
     expect(bodies.every((body) => body.includes("<!-- dual-review:round=2 -->"))).toBe(true);
     const patches = findAll(calls, "PATCH");
     expect(patches).toHaveLength(2);
-    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/111"))!)).toBe(`body=> Superseded by round 2: \n<!-- dual-review:claude -->\n${oldClaude}`);
-    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/222"))!)).toBe(`body=> Superseded by round 2: \n<!-- dual-review:codex -->\n${oldCodex}`);
+    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/111"))!)).toBe(`body=<!-- dual-review:claude -->\n> Superseded by round 2: \n${oldClaude}`);
+    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/222"))!)).toBe(`body=<!-- dual-review:codex -->\n> Superseded by round 2: \n${oldCodex}`);
+  });
+
+  test("upgrades an unnumbered historical pair to round 2, not round 3", async () => {
+    const { run, calls } = harness({ claude: "old claude", codex: "old codex" });
+    const results = await postToPr(42, ENV, run, () => AT);
+    expect(results.every((result) => result.round === 2)).toBe(true);
+    expect(findAll(calls, "POST").every((call) => bodyArg(call).includes("<!-- dual-review:round=2 -->"))).toBe(true);
   });
 
   test("scopes each lookup to our own comments (author check), without --slurp", async () => {

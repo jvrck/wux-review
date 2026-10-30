@@ -59,6 +59,10 @@ describe("runReview", () => {
     await expect(runReview({ ref: "HEAD~1", pr: 7 }, { loadConfig: async () => ({}) })).rejects.toThrow("not both");
   });
 
+  test("rejects an expected head without a PR for every caller", async () => {
+    await expect(runReview({ expectHead: "a".repeat(40) }, { loadConfig: async () => ({}) })).rejects.toThrow("expect_head requires pr");
+  });
+
   // #100: the envelope carries a 1-based round, sourced from and persisted to the
   // session state, so a re-review's in-place comment edit is detectable.
   test("stamps a 1-based round on the envelope and increments it each --session re-review", async () => {

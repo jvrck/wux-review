@@ -23,7 +23,7 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
       inputSchema: {
         ref: z.string().min(1).optional(),
         pr: z.number().int().positive().optional(),
-        expect_head: z.string().min(1).optional(),
+        expect_head: z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-hex SHA").optional(),
         lenses: z.array(z.string().min(1)).min(1).optional(),
         post_to_pr: z.number().int().positive().optional(),
         session: z.string().min(1).optional(),
