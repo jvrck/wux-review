@@ -94,6 +94,19 @@ test("observable cleanup removes the exact sibling Codex last-use marker", () =>
   expect(script).toContain(`rm -f -- '${join(CODEX_HOME_ROOT, "wuxr-codex-home-marker.wuxr-last-use")}'`);
 });
 
+test("observable cwd checks use the wrapper's fixed PATH helper", () => {
+  const script = buildObservableWrapperScript({
+    argsPath: "/tmp/args",
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    donePath: "/tmp/done",
+    readyPath: "/tmp/ready",
+    cwd: "/tmp/reviewer-cwd",
+  });
+  expect(script).toContain("__wuxr_evidence=$(PATH=/usr/bin:/bin cat '/tmp/ready')");
+  expect(script).not.toContain("__wuxr_evidence=$(cat ");
+});
+
 interface HarnessOptions {
   existing?: string[];
   statusJson?: string;

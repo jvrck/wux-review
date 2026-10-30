@@ -851,16 +851,29 @@ async function pruneStaleCodexHomes(
     await Promise.all(entries.map(async (entry) => {
       if (!entry.name.startsWith("wuxr-codex-home-")) return;
       const path = join(root, entry.name);
-      const metadata = await lstat(path);
+      const metadata = await lstat(path).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      });
       // lstat is intentional: symlinks are never followed or removed here.
-      if (!metadata.isDirectory() || metadata.isSymbolicLink() || referenced.has(path)) return;
+      if (
+        metadata === undefined
+        || !metadata.isDirectory()
+        || metadata.isSymbolicLink()
+        || referenced.has(path)
+      ) return;
       const markerPath = codexHomeLastUseMarker(root, path);
-      const marker = await lstat(markerPath).catch(() => undefined);
+      const marker = await lstat(markerPath).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      });
       // A real parent-owned marker is authoritative. A legacy unmarked home
       // falls back to its directory mtime; clamp either source so a reviewer
       // cannot retain abandoned state indefinitely by writing a future time.
       const validMarker = marker?.isFile() === true && !marker.isSymbolicLink();
-      const lastUse = Math.min(validMarker ? marker.mtimeMs : metadata.mtimeMs, Date.now());
+      const now = Date.now();
+      const markerMtime = validMarker ? marker.mtimeMs : metadata.mtimeMs;
+      const lastUse = Math.min(markerMtime, now);
       // Adopt legacy and invalid markers alike. An invalid sibling is removed
       // with lstat-derived type information before replacement, so a child
       // cannot pin an abandoned home with a symlink or other non-regular entry.
@@ -875,6 +888,11 @@ async function pruneStaleCodexHomes(
           });
         }
         await adoptLegacyCodexHomeMarker(markerPath, lastUse);
+      } else if (marker.mtimeMs > now) {
+        // Persist the first-seen clamp. Merely clamping in memory would let an
+        // abandoned home with a future-dated marker remain fresh until that
+        // future time arrives.
+        await stampExistingCodexHomeMarker(markerPath, new Date(lastUse));
       }
       if (lastUse >= cutoff) return;
       await rm(path, { recursive: true, force: true });
@@ -889,20 +907,31 @@ async function pruneStaleCodexHomes(
 }
 
 async function adoptLegacyCodexHomeMarker(marker: string, lastUse: number): Promise<void> {
+  let file;
   try {
-    await writeFile(marker, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    file = await open(marker, "wx", 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
     throw error;
   }
-  await utimes(marker, new Date(lastUse), new Date(lastUse));
+  try {
+    // Stamp the file descriptor, not the path. Another process cannot redirect
+    // this timestamp update to a replacement path between creation and stamp.
+    await file.utimes(new Date(lastUse), new Date(lastUse));
+  } finally {
+    await file.close();
+  }
 }
 
 async function pruneOrphanedCodexMarkers(root: string, cutoff: number): Promise<void> {
   for (const entry of await readdir(root, { withFileTypes: true })) {
     if (!entry.name.startsWith("wuxr-codex-home-") || !entry.name.endsWith(CODEX_HOME_LAST_USE_SUFFIX)) continue;
     const markerPath = join(root, entry.name);
-    const marker = await lstat(markerPath);
+    const marker = await lstat(markerPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (marker === undefined) continue;
     if (!marker.isFile() || marker.isSymbolicLink() || Math.min(marker.mtimeMs, Date.now()) >= cutoff) continue;
     const homeName = entry.name.slice(0, -CODEX_HOME_LAST_USE_SUFFIX.length);
     const home = await lstat(join(root, homeName)).catch(() => undefined);
@@ -917,25 +946,54 @@ function codexHomeLastUseMarker(root: string, home: string): string {
 
 async function touchCodexHomeLastUse(root: string, home: string): Promise<void> {
   const marker = codexHomeLastUseMarker(root, home);
-  const metadata = await lstat(marker).catch((error) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (metadata === undefined) {
-    await writeFile(marker, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+  const now = new Date(Date.now());
+  let file;
+  try {
+    file = await open(marker, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  if (file !== undefined) {
+    try {
+      await file.utimes(now, now);
+    } finally {
+      await file.close();
+    }
     return;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error("last-use marker is not a regular file");
-  }
-  await utimes(marker, new Date(), new Date());
+  await stampExistingCodexHomeMarker(marker, now);
 }
 
-export async function prepareReviewerCwd(parentDir?: string): Promise<ReviewerCwd> {
+async function stampExistingCodexHomeMarker(marker: string, time: Date): Promise<void> {
+  // O_NOFOLLOW closes the lstat/open replacement window for an existing marker.
+  // The descriptor is then checked and stamped directly, so neither this update
+  // nor a create-and-stamp sequence can alter a link target.
+  let file;
+  try {
+    file = await open(marker, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error("last-use marker is not a regular file");
+    }
+    throw error;
+  }
+  try {
+    const metadata = await file.stat();
+    if (!metadata.isFile()) throw new Error("last-use marker is not a regular file");
+    await file.utimes(time, time);
+  } finally {
+    await file.close();
+  }
+}
+
+export async function prepareReviewerCwd(
+  parentDir?: string,
+  referencedCleanupDirs: () => Promise<Set<string>> = activeObservableCleanupDirs,
+): Promise<ReviewerCwd> {
   let createdPath: string | undefined;
   try {
     const root = parentDir ?? await secureReviewerCwdRoot();
-    if (parentDir === undefined) await pruneStaleReviewerCwds(root, activeObservableCleanupDirs);
+    if (parentDir === undefined) await pruneStaleReviewerCwds(root, referencedCleanupDirs);
     createdPath = await mkdtemp(join(root, "wuxr-reviewer-cwd-"));
     await chmod(createdPath, 0o700);
   } catch (error) {
@@ -966,8 +1024,13 @@ async function pruneStaleReviewerCwds(
     for (const entry of await readdir(root, { withFileTypes: true })) {
       if (!entry.name.startsWith("wuxr-reviewer-cwd-")) continue;
       const path = join(root, entry.name);
-      const metadata = await lstat(path);
+      const metadata = await lstat(path).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      });
       if (
+        metadata === undefined
+        ||
         !metadata.isDirectory()
         || metadata.isSymbolicLink()
         || metadata.mtimeMs >= cutoff

@@ -652,9 +652,11 @@ export function buildObservableWrapperScript(paths: {
           : legacyCleanupDir
             ? [
                 // The previous release created this exact tmpdir child. Check
-                // the link type before recursion: a symlink is deliberately
-                // left in place here, so its target can never be traversed.
-                `  if [ ! -L ${shq(paths.cleanupDir)} ] && [ -d ${shq(paths.cleanupDir)} ] && [ -O ${shq(paths.cleanupDir)} ]; then`,
+                // the link type before recursion: unlink a legacy symlink
+                // without traversing its target, matching recovery cleanup.
+                `  if [ -L ${shq(paths.cleanupDir)} ]; then`,
+                `    ${helper} rm -f -- ${shq(paths.cleanupDir)}`,
+                `  elif [ -d ${shq(paths.cleanupDir)} ] && [ -O ${shq(paths.cleanupDir)} ]; then`,
                 `    ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
                 "  fi",
               ]
@@ -671,7 +673,7 @@ export function buildObservableWrapperScript(paths: {
     ? timedInvoke
     : [
         `__wuxr_cwd=${shq(paths.cwd)}`,
-        `__wuxr_evidence=$(cat ${shq(paths.readyPath)})`,
+        `__wuxr_evidence=$(${helper} cat ${shq(paths.readyPath)})`,
         'if [ ! -d "$__wuxr_cwd" ]; then',
         '  printf \'{"type":"reviewer-cwd","phase":"before","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
         `  printf %s ${shq(`claude reviewer: working directory ${paths.cwd} was removed before the leg`)} > ${shq(paths.stderrPath)}`,
