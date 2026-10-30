@@ -1,6 +1,6 @@
 import { constants as fsConstants } from "node:fs";
 import type { Dirent } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
@@ -932,10 +932,16 @@ async function pruneOrphanedCodexMarkers(root: string, cutoff: number): Promise<
       throw error;
     });
     if (marker === undefined) continue;
-    if (!marker.isFile() || marker.isSymbolicLink() || Math.min(marker.mtimeMs, Date.now()) >= cutoff) continue;
+    if (!marker.isFile() || marker.isSymbolicLink()) continue;
     const homeName = entry.name.slice(0, -CODEX_HOME_LAST_USE_SUFFIX.length);
     const home = await lstat(join(root, homeName)).catch(() => undefined);
     if (home !== undefined) continue;
+    const now = Date.now();
+    const lastUse = Math.min(marker.mtimeMs, now);
+    // Persist a future-time clamp on the first pass, just as for home markers.
+    // Otherwise the marker would appear fresh until its original future date.
+    if (marker.mtimeMs > now) await stampExistingCodexHomeMarker(markerPath, new Date(lastUse));
+    if (lastUse >= cutoff) continue;
     await rm(markerPath, { force: true });
   }
 }

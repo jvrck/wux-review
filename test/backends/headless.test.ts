@@ -2882,6 +2882,43 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     }
   });
 
+  test("normalizes a future-dated orphan marker once without changing an in-range orphan", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const future = join(root, "wuxr-codex-home-future-orphan.wuxr-last-use");
+    const inRange = join(root, "wuxr-codex-home-in-range-orphan.wuxr-last-use");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([Bun.write(future, ""), Bun.write(inRange, "")]);
+      const futureTime = new Date(initialNow + 10 * 365 * 24 * 60 * 60 * 1000);
+      const inRangeTime = new Date(initialNow - 60 * 60 * 1000);
+      await Promise.all([
+        utimes(future, futureTime, futureTime),
+        utimes(inRange, inRangeTime, inRangeTime),
+      ]);
+
+      const first = await prepareIsolatedCodexHome(async () => new Set());
+      await first.cleanup();
+      expect((await stat(future)).mtimeMs).toBeCloseTo(initialNow, -2);
+      expect((await stat(inRange)).mtimeMs).toBeCloseTo(inRangeTime.getTime(), -2);
+
+      clock.mockReturnValue(initialNow + 24 * 60 * 60 * 1000 + 1);
+      const second = await prepareIsolatedCodexHome(async () => new Set());
+      await second.cleanup();
+      await expect(lstat(future)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(inRange)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
   test("isolates via an auth env var even with no auth.json to copy (CI / batch hosts)", async () => {
     const src = await mkdtemp(join(tmpdir(), "wuxr-src-home-"));
     await withCleanEnv(src, async () => {

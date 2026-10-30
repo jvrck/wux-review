@@ -40,11 +40,13 @@ retry attempts; other stream failures use the normal bounded retry policy.
 ## Interrupted-round upgrade note
 
 Before upgrading, reconcile interrupted observable rounds with the binary that
-created them. The upgraded binary intentionally rejects a pre-upgrade temporary
-cleanup directory rather than weakening its cleanup guard; remove that old
-directory manually if it cannot be reconciled first. Run reconciliation with
-the same `XDG_STATE_HOME` that the round used, because recovery resolves its
-state-home location from the current environment.
+created them. The upgraded binary accepts the previous release's exact
+`wuxr-reviewer-cwd-*` directory directly under the OS temporary directory for
+reconciliation and cleanup when it is a real directory owned by the current
+user; a symlink at that path is unlinked without following it. Other cleanup
+directory shapes remain rejected. Run reconciliation with the same
+`XDG_STATE_HOME` that the round used, because recovery resolves its state-home
+location from the current environment.
 
 ## What runs
 - **Reporting scan** (`dependency-scan`): verifies the text `bun.lock` (not
