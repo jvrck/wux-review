@@ -112,6 +112,7 @@ const roundSchema = z.object({
   updatedAt: z.string(),
   diagnostic: z.string().optional(),
   cleanupPending: z.boolean().optional(),
+  parseFailed: z.boolean().optional(),
   finalization: z.object({
     sessionStateSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     results: z.object({
@@ -221,6 +222,7 @@ export interface ObservableRoundRecord {
   updatedAt: string;
   diagnostic?: string;
   cleanupPending?: boolean;
+  parseFailed?: boolean;
   finalization?: {
     sessionStateSha256: string | null;
     results: {

@@ -19,6 +19,24 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   uses a last-use marker, a timeout-aware cutoff, and durable round references
   so it cannot reclaim an active or recoverable leg's home.
 
+## 2026.10.26
+
+### Fixed
+
+- **Tolerant reviewer findings.** `file: null` or an omitted file now renders as
+  `(general)`, and `repro: null` is treated as absent. Unknown report and
+  finding keys are discarded with a stderr notice, while malformed reports and
+  invalid verdict fields still fail closed. Observable rounds that failed only
+  while parsing retained findings, including parse-only rounds journaled by
+  2026.10.19, can now be reconciled from their stored evidence after upgrading
+  without new model calls.
+
+### Security
+
+- **Dependency security refresh.** Pinned the transitive `body-parser` package
+  to its fixed release for the current high-severity decompression error
+  advisory (CVE-2026-111181).
+
 ## 2026.10.19
 
 ### Fixed

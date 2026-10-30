@@ -87,6 +87,7 @@ export interface RunReviewersOptions {
     state: ObservableLifecycleState,
     diagnostic?: string,
     cleanupPending?: boolean,
+    parseFailed?: boolean,
   ) => Promise<void>;
   // On a `--session` re-review, each leg's OWN prior-round findings — never the
   // other leg's, so the two reviewers stay independent. Fed into that leg's prompt
@@ -270,10 +271,14 @@ export async function runReviewers(
     const state = cleanupPending
       ? cleanupPendingStateOf(journalError)
       : lifecycleStateOf(journalError, abort.signal.reason);
+    // Use the same terminal error for both fields. A sibling cleanup failure
+    // must never leave a parse-only marker paired with an unrelated diagnostic.
+    const parseFailed = isFindingsParseError(journalError);
     await options.finishObservableRound?.(
       state,
-      errorDetail(journalError),
+      parseFailed ? `findings-parse: ${errorDetail(journalError)}` : errorDetail(journalError),
       cleanupPending,
+      parseFailed,
     ).catch(() => undefined);
     if (cleanupPending && journalError !== error) {
       throw new WuxReviewError(
@@ -430,7 +435,20 @@ async function invoke(
     }
     throw new WuxReviewError(`${reviewer} reviewer failed to run: ${(err as Error).message}`);
   }
-  return parseReport(reviewer, raw);
+  try {
+    return parseReport(reviewer, raw);
+  } catch (error) {
+    // The process completed and its durable raw output can be parsed again by a
+    // later binary. Keep that distinct from launch/execution failures.
+    const parseError = error instanceof Error
+      ? error
+      : new WuxReviewError(`${reviewer} reviewer findings parser failed`);
+    throw Object.assign(parseError, { parseFailed: true });
+  }
+}
+
+function isFindingsParseError(error: unknown): boolean {
+  return error instanceof Error && "parseFailed" in error && error.parseFailed === true;
 }
 
 // A short, filesystem/tmux-safe id. Date-based so concurrent runs don't collide;

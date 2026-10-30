@@ -255,7 +255,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
           })
         : undefined,
       finishObservableRound: observable
-        ? (state, diagnostic, cleanupPending) => serializeRecovery(async () => {
+        ? (state, diagnostic, cleanupPending, parseFailed) => serializeRecovery(async () => {
             if (recoveryRecord === undefined) return;
             // Successful reviewer collection is not a committed round. Keep the
             // evidence replayable until the pipeline journals the exact target
@@ -269,6 +269,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
               ...recoveryRecord,
               state: journalState,
               cleanupPending: cleanupPending === true,
+              parseFailed: parseFailed === true,
               updatedAt: new Date().toISOString(),
               ...(diagnostic === undefined ? {} : { diagnostic }),
             };
