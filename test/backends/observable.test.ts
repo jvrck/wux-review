@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildObservableWrapperScript,
   defaultObservableDeps,
   discardObservableLeg,
   discardPreparedObservableLeg,
   OBSERVABLE_DRAIN_READS_PER_PASS,
   ObservableLifecycleError,
+  removeObservableCleanupDir,
   runObservableLeg,
   scheduleFileRemoval,
   validateObservableCleanup,
@@ -15,7 +17,7 @@ import {
   type ObservableLegInput,
   type ObservableRunOptions,
 } from "../../src/backends/observable";
-import { codexHomeRoot } from "../../src/backends/codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "../../src/backends/codex-home";
 import { REVIEWER_STDERR_TAIL_BYTES } from "../../src/backends/capture-limits";
 import {
   MACHINE_EVENT_READ_CHUNK_BYTES,
@@ -29,12 +31,17 @@ const CLAUDE_STREAM = JSON.stringify({
   result: REPORT,
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
+const REVIEWER_CWD_ROOT = reviewerCwdRoot();
 
 test("validateObservableCleanup accepts only expected Codex home shapes", () => {
   const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
   const cwd = join(home, "wuxr-reviewer-cwd-def");
+  const claudeCwd = join(REVIEWER_CWD_ROOT, "wuxr-reviewer-cwd-def");
+  const legacyClaudeCwd = join(tmpdir(), "wuxr-reviewer-cwd-legacy");
   expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
   expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], claudeCwd, "/tmp/adapter")).not.toThrow();
+  expect(() => validateObservableCleanup([], legacyClaudeCwd, "/tmp/adapter")).not.toThrow();
   for (const unsafe of [
     "/",
     "relative",
@@ -42,11 +49,62 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
     join(CODEX_HOME_ROOT, "wrong-name"),
     join(tmpdir(), "wuxr-codex-home-old-location"),
     join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
+    `${tmpdir()}/nested/wuxr-reviewer-cwd-legacy`,
+    join(tmpdir(), "wrong-reviewer-cwd-legacy"),
+    `${tmpdir()}/nested/../wuxr-reviewer-cwd-legacy`,
   ]) {
     expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(
       "unsafe observable cleanup directory",
     );
   }
+});
+
+test("legacy reviewer-cwd cleanup unlinks a symlink without touching its target", async () => {
+  const legacy = join(tmpdir(), `wuxr-reviewer-cwd-legacy-${process.pid}-${Date.now()}`);
+  const outside = await mkdtemp(join(tmpdir(), "wuxr-outside-"));
+  const target = join(outside, "target");
+  try {
+    await writeFile(target, "outside");
+    await symlink(target, legacy);
+    const deps = defaultObservableDeps(async () => ({
+      code: 0,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+    }));
+    await removeObservableCleanupDir(deps, legacy);
+    await expect(lstat(legacy)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await Bun.file(target).text()).toBe("outside");
+  } finally {
+    await rm(legacy, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("observable cleanup removes the exact sibling Codex last-use marker", () => {
+  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-marker");
+  const script = buildObservableWrapperScript({
+    argsPath: "/tmp/args",
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    donePath: "/tmp/done",
+    readyPath: "/tmp/ready",
+    cleanupDir: home,
+  });
+  expect(script).toContain(`rm -f -- '${join(CODEX_HOME_ROOT, "wuxr-codex-home-marker.wuxr-last-use")}'`);
+});
+
+test("observable cwd checks use the wrapper's fixed PATH helper", () => {
+  const script = buildObservableWrapperScript({
+    argsPath: "/tmp/args",
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    donePath: "/tmp/done",
+    readyPath: "/tmp/ready",
+    cwd: "/tmp/reviewer-cwd",
+  });
+  expect(script).toContain("__wuxr_evidence=$(PATH=/usr/bin:/bin cat '/tmp/ready')");
+  expect(script).not.toContain("__wuxr_evidence=$(cat ");
 });
 
 interface HarnessOptions {

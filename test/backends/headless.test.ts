@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, utimes } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   createClaudeHeadlessBackend,
   createCodexHeadlessBackend,
@@ -17,7 +17,8 @@ import {
   type HeadlessRunResult,
 } from "../../src/backends/headless";
 import { buildObservableWrapperScript } from "../../src/backends/observable";
-import { codexHomeRoot } from "../../src/backends/codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "../../src/backends/codex-home";
+import { activeObservableCleanupDirs } from "../../src/review/observable-lifecycle";
 import {
   MACHINE_EVENT_PARSE_LIMIT_BYTES,
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
@@ -33,7 +34,7 @@ const CODEX_COMMAND = JSON.stringify({
   item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
-const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
+const REVIEWER_CWD = join(reviewerCwdRoot(), "wuxr-reviewer-cwd-test");
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
 
@@ -71,6 +72,7 @@ interface Opts {
   timeoutMs?: number;
   isolateCodexHome?: boolean;
   homeDiagnostics?: string[];
+  touchError?: string;
   // Inject a precise isolated-home setup failure.
   prepareError?: string;
   // Observable execution controls the Wux-shell launch result, captured stdout
@@ -262,6 +264,9 @@ function harness(opts: Opts = {}) {
         ...(opts.observableCleanupPath === undefined
           ? {}
           : { observableCleanupPath: opts.observableCleanupPath }),
+        ...(opts.touchError === undefined
+          ? {}
+          : { touchLastUse: async () => { throw new Error(opts.touchError); } }),
       };
     },
     prepareReviewerCwd: async (parentDir) => {
@@ -466,6 +471,28 @@ describe("createClaudeHeadlessBackend", () => {
     await expect(createClaudeHeadlessBackend(deps)("P", { sessionName: "s", direct: true })).rejects.toThrow(
       "claude -p failed: auth required run /login",
     );
+  });
+
+  test("names a removed private cwd instead of relaying Claude's generic cwd error", async () => {
+    const h = harness({
+      runResult: {
+        code: 125,
+        stderr: `claude reviewer: working directory ${REVIEWER_CWD} was removed during the leg`,
+      },
+    });
+    await expect(createClaudeHeadlessBackend(h.deps)("P", { sessionName: "removed-cwd", direct: true }))
+      .rejects.toThrow(`working directory ${REVIEWER_CWD} was removed during the leg`);
+  });
+
+  test("recognizes a cwd-removal marker after prior Claude stderr", async () => {
+    const h = harness({
+      runResult: {
+        code: 125,
+        stderr: `Claude warning\nclaude reviewer: working directory ${REVIEWER_CWD} was removed during the leg`,
+      },
+    });
+    await expect(createClaudeHeadlessBackend(h.deps)("P", { sessionName: "removed-cwd-stderr", direct: true }))
+      .rejects.toThrow(`working directory ${REVIEWER_CWD} was removed during the leg`);
   });
 
   test("a failure envelope (is_error true) is a typed error with the api status", async () => {
@@ -1380,6 +1407,95 @@ describe("observable Wux adapter", () => {
     }
   });
 
+  test("the generated wrapper records missing cwd states and preserves path-specific errors", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-cwd-"));
+    try {
+      const evidence = join(dir, "evidence");
+      const cwd = join(dir, "missing");
+      const argsPath = join(dir, "args");
+      const readyPath = join(dir, "ready");
+      const stderrPath = join(dir, "stderr");
+      const donePath = join(dir, "done");
+      const scriptPath = join(dir, "wrap.sh");
+      await mkdir(evidence);
+      await Bun.write(join(evidence, "events.jsonl"), "");
+      await Bun.write(argsPath, "/usr/bin/true\0");
+      await Bun.write(readyPath, `${evidence}\n`);
+      await Bun.write(scriptPath, buildObservableWrapperScript({
+        argsPath, stdoutPath: join(dir, "stdout"), stderrPath, donePath, readyPath, cwd,
+      }));
+      expect(await Bun.spawn(["/bin/bash", scriptPath]).exited).toBe(0);
+      const stderr = await Bun.file(stderrPath).text();
+      expect(await Bun.file(donePath).text()).toBe("125");
+      expect(await Bun.file(join(evidence, "events.jsonl")).text()).toContain('"phase":"before","exists":false');
+      expect(stderr).toContain("removed before the leg");
+      const h = harness({ runResult: { code: 125, stderr } });
+      await expect(createClaudeHeadlessBackend(h.deps)("P", { sessionName: "cwd-before", direct: true }))
+        .rejects.toThrow(`working directory ${cwd} was removed before the leg`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the generated wrapper records a cwd removed during execution on its own stderr line", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-cwd-"));
+    try {
+      const evidence = join(dir, "evidence");
+      const cwd = join(dir, "cwd");
+      const stub = join(dir, "remove-cwd.sh");
+      const argsPath = join(dir, "args");
+      const readyPath = join(dir, "ready");
+      const stderrPath = join(dir, "stderr");
+      const donePath = join(dir, "done");
+      const scriptPath = join(dir, "wrap.sh");
+      await Promise.all([mkdir(evidence), mkdir(cwd)]);
+      await Bun.write(join(evidence, "events.jsonl"), "");
+      await Bun.write(stub, "#!/bin/sh\nprintf 'prior stderr' >&2\nrmdir \"$1\"\nexit 7\n");
+      await chmod(stub, 0o700);
+      await Bun.write(argsPath, `${stub}\0${cwd}\0`);
+      await Bun.write(readyPath, `${evidence}\n`);
+      await Bun.write(scriptPath, buildObservableWrapperScript({
+        argsPath, stdoutPath: join(dir, "stdout"), stderrPath, donePath, readyPath, cwd,
+      }));
+      expect(await Bun.spawn(["/bin/bash", scriptPath]).exited).toBe(0);
+      const stderr = await Bun.file(stderrPath).text();
+      expect(await Bun.file(donePath).text()).toBe("125");
+      expect(await Bun.file(join(evidence, "events.jsonl")).text()).toContain('"phase":"after","exists":false');
+      expect(stderr).toBe(`prior stderr\nclaude reviewer: working directory ${cwd} was removed during the leg`);
+      const h = harness({ runResult: { code: 125, stderr } });
+      await expect(createClaudeHeadlessBackend(h.deps)("P", { sessionName: "cwd-during", direct: true }))
+        .rejects.toThrow(`working directory ${cwd} was removed during the leg`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the generated wrapper records a cwd that remains present and preserves the command exit code", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-cwd-"));
+    try {
+      const evidence = join(dir, "evidence");
+      const cwd = join(dir, "cwd");
+      const argsPath = join(dir, "args");
+      const readyPath = join(dir, "ready");
+      const donePath = join(dir, "done");
+      const scriptPath = join(dir, "wrap.sh");
+      await Promise.all([mkdir(evidence), mkdir(cwd)]);
+      await Bun.write(join(evidence, "events.jsonl"), "");
+      await Bun.write(argsPath, "/usr/bin/false\0");
+      await Bun.write(readyPath, `${evidence}\n`);
+      await Bun.write(scriptPath, buildObservableWrapperScript({
+        argsPath, stdoutPath: join(dir, "stdout"), stderrPath: join(dir, "stderr"), donePath, readyPath, cwd,
+      }));
+      expect(await Bun.spawn(["/bin/bash", scriptPath]).exited).toBe(0);
+      expect(await Bun.file(donePath).text()).toBe("1");
+      const events = await Bun.file(join(evidence, "events.jsonl")).text();
+      expect(events).toContain('"phase":"before","exists":true');
+      expect(events).toContain('"phase":"after","exists":true');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("the generated wrapper terminates an over-budget model before publishing its timeout marker", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-timeout-"));
     try {
@@ -2144,6 +2260,13 @@ describe("codex leg: per-leg CODEX_HOME isolation", () => {
     );
   });
 
+  test("continues a Codex leg when last-use marker updates fail", async () => {
+    const h = harness({ isolateCodexHome: true, touchError: "marker EIO" });
+    await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "marker-best-effort", direct: true }))
+      .resolves.toBe(REPORT);
+    expect(h.warns.filter((message) => message.includes("last-use marker"))).toHaveLength(2);
+  });
+
   test("fails closed instead of loading the shared home when isolation is unavailable", async () => {
     const h = harness({ isolateCodexHome: true, prepareError: "permission denied" });
     await expect(createCodexHeadlessBackend(h.deps)("P", { sessionName: "s", direct: true }))
@@ -2424,19 +2547,26 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     const root = join(state, "wux-review", "codex-homes");
     const oldHome = join(root, "wuxr-codex-home-old");
     const youngHome = join(root, "wuxr-codex-home-young");
+    const markedHome = join(root, "wuxr-codex-home-recent-marker");
     const other = join(root, "other-old");
     const outside = await mkdtemp(join(tmpdir(), "wuxr-outside-"));
     const link = join(root, "wuxr-codex-home-link");
     try {
       await mkdir(root, { recursive: true });
-      await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(other)]);
+      await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(markedHome), mkdir(other)]);
       const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
-      await Promise.all([utimes(oldHome, old, old), utimes(other, old, old)]);
+      await Bun.write(join(root, `${basename(markedHome)}.wuxr-last-use`), "");
+      await Promise.all([
+        utimes(oldHome, old, old),
+        utimes(markedHome, old, old),
+        utimes(other, old, old),
+      ]);
       await symlink(outside, link);
       const home = await prepareIsolatedCodexHome();
       await home.cleanup();
       expect(await Bun.file(oldHome).exists()).toBe(false);
       expect((await lstat(youngHome)).isDirectory()).toBe(true);
+      expect((await lstat(markedHome)).isDirectory()).toBe(true);
       expect((await lstat(other)).isDirectory()).toBe(true);
       expect((await lstat(link)).isSymbolicLink()).toBe(true);
       expect((await lstat(outside)).isDirectory()).toBe(true);
@@ -2445,6 +2575,347 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
       else process.env.XDG_STATE_HOME = prior;
       await rm(state, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps journal-referenced homes and grows the cutoff with the configured maximum timeout", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const journalDir = join(state, "journals");
+    const journalPath = join(journalDir, `prune-${process.pid}-${Date.now()}.json`);
+    const priorState = process.env.XDG_STATE_HOME;
+    const priorMax = process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS;
+    process.env.XDG_STATE_HOME = state;
+    process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS = String(13 * 60 * 60 * 1000);
+    const root = join(state, "wux-review", "codex-homes");
+    const referenced = join(root, "wuxr-codex-home-referenced");
+    const expired = join(root, "wuxr-codex-home-expired");
+    const timeoutProtected = join(root, "wuxr-codex-home-timeout-protected");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(referenced), mkdir(expired), mkdir(timeoutProtected), mkdir(journalDir, { recursive: true })]);
+      const referencedOld = new Date(Date.now() - 27 * 60 * 60 * 1000);
+      const timeoutOld = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await Promise.all([
+        utimes(referenced, referencedOld, referencedOld),
+        utimes(expired, referencedOld, referencedOld),
+        utimes(timeoutProtected, timeoutOld, timeoutOld),
+      ]);
+      await Bun.write(journalPath, JSON.stringify({
+        version: 1,
+        reviewId: `prune-${process.pid}`,
+        round: 1,
+        executionId: "test",
+        sessionMode: false,
+        priorStateSha256: null,
+        expected: { claudeChildName: "wuxr-prune-claude", codexChildName: "wuxr-prune-codex" },
+        ledger: { claude: [], codex: [] },
+        evidence: {
+          claude: [],
+          codex: [{
+            reviewer: "codex", childName: "wuxr-prune-codex", attempt: 1,
+            evidencePath: "/evidence", resultPath: "/result", resultId: "test",
+            promptSha256: "a".repeat(64), transientBase: "/tmp/base", cleanupDir: referenced,
+          }],
+        },
+        state: "running",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }));
+      const home = await prepareIsolatedCodexHome(() => activeObservableCleanupDirs({ stateDir: journalDir }));
+      await home.cleanup();
+      expect((await lstat(referenced)).isDirectory()).toBe(true);
+      expect(await Bun.file(expired).exists()).toBe(false);
+      expect((await lstat(timeoutProtected)).isDirectory()).toBe(true);
+    } finally {
+      if (priorState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = priorState;
+      if (priorMax === undefined) delete process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS;
+      else process.env.WUX_REVIEW_CODEX_MAX_TIMEOUT_MS = priorMax;
+      await rm(journalPath, { force: true });
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("never follows a child-planted last-use symlink", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const outside = join(state, "outside-marker");
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      await Bun.write(outside, "outside");
+      const before = (await stat(outside)).mtimeMs;
+      const home = await prepareIsolatedCodexHome(async () => new Set());
+      const root = join(state, "wux-review", "codex-homes");
+      const marker = join(root, `${basename(home.env.CODEX_HOME!)}.wuxr-last-use`);
+      await rm(marker);
+      await symlink(outside, marker);
+      await expect(home.touchLastUse!()).rejects.toThrow("not a regular file");
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await utimes(home.env.CODEX_HOME!, old, old);
+      const replacement = await prepareIsolatedCodexHome(async () => new Set());
+      expect((await stat(outside)).mtimeMs).toBe(before);
+      expect(await Bun.file(home.env.CODEX_HOME!).exists()).toBe(false);
+      expect(await Bun.file(marker).exists()).toBe(false);
+      await replacement.cleanup();
+      await home.cleanup();
+      expect(await Bun.file(outside).exists()).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("replaces an invalid future-dated marker and expires the home from first sight", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const outside = join(state, "outside-marker");
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const legacy = join(root, "wuxr-codex-home-invalid-marker");
+    const marker = join(root, `${basename(legacy)}.wuxr-last-use`);
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(legacy), Bun.write(outside, "outside")]);
+      const future = new Date(initialNow + 10 * 365 * 24 * 60 * 60 * 1000);
+      await utimes(legacy, future, future);
+      await symlink(outside, marker);
+      const before = await Bun.file(outside).text();
+
+      const first = await prepareIsolatedCodexHome(async () => new Set());
+      await first.cleanup();
+      const replaced = await lstat(marker);
+      expect(replaced.isFile()).toBe(true);
+      expect(replaced.isSymbolicLink()).toBe(false);
+      expect(replaced.mtimeMs).toBeCloseTo(initialNow, -2);
+      expect(await Bun.file(outside).text()).toBe(before);
+
+      clock.mockReturnValue(initialNow + 24 * 60 * 60 * 1000 + 1);
+      const second = await prepareIsolatedCodexHome(async () => new Set());
+      await second.cleanup();
+      expect(await Bun.file(legacy).exists()).toBe(false);
+      expect(await Bun.file(outside).text()).toBe(before);
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizes a future-dated regular marker once, without changing an in-range marker", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const futureHome = join(root, "wuxr-codex-home-future-marker");
+    const futureMarker = join(root, `${basename(futureHome)}.wuxr-last-use`);
+    const inRangeHome = join(root, "wuxr-codex-home-in-range-marker");
+    const inRangeMarker = join(root, `${basename(inRangeHome)}.wuxr-last-use`);
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(futureHome), mkdir(inRangeHome)]);
+      await Promise.all([Bun.write(futureMarker, ""), Bun.write(inRangeMarker, "")]);
+      const future = new Date(initialNow + 10 * 365 * 24 * 60 * 60 * 1000);
+      const inRange = new Date(initialNow - 60 * 60 * 1000);
+      await Promise.all([
+        utimes(futureMarker, future, future),
+        utimes(inRangeMarker, inRange, inRange),
+      ]);
+
+      const first = await prepareIsolatedCodexHome(async () => new Set());
+      await first.cleanup();
+      expect((await stat(futureMarker)).mtimeMs).toBeCloseTo(initialNow, -2);
+      expect((await stat(inRangeMarker)).mtimeMs).toBeCloseTo(inRange.getTime(), -2);
+      expect((await lstat(futureHome)).isDirectory()).toBe(true);
+
+      clock.mockReturnValue(initialNow + 24 * 60 * 60 * 1000 + 1);
+      const second = await prepareIsolatedCodexHome(async () => new Set());
+      await second.cleanup();
+      await expect(lstat(futureHome)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(inRangeHome)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("stamps a newly created Codex marker through its open file handle", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now() - 60 * 60 * 1000;
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const home = await prepareIsolatedCodexHome(async () => new Set());
+      const marker = join(
+        state,
+        "wux-review",
+        "codex-homes",
+        `${basename(home.env.CODEX_HOME!)}.wuxr-last-use`,
+      );
+      expect((await stat(marker)).mtimeMs).toBeCloseTo(initialNow, -2);
+      await home.cleanup();
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("replaces an invalid directory marker without extending a future-dated home", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const legacy = join(root, "wuxr-codex-home-invalid-directory-marker");
+    const marker = join(root, `${basename(legacy)}.wuxr-last-use`);
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(legacy), mkdir(marker)]);
+      const future = new Date(initialNow + 10 * 365 * 24 * 60 * 60 * 1000);
+      await utimes(legacy, future, future);
+
+      const first = await prepareIsolatedCodexHome(async () => new Set());
+      await first.cleanup();
+      expect((await lstat(marker)).isFile()).toBe(true);
+
+      clock.mockReturnValue(initialNow + 24 * 60 * 60 * 1000 + 1);
+      const second = await prepareIsolatedCodexHome(async () => new Set());
+      await second.cleanup();
+      expect(await Bun.file(legacy).exists()).toBe(false);
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("uses a valid marker over a future home mtime and clamps legacy future mtimes", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const marked = join(root, "wuxr-codex-home-old-marker");
+    const legacyFuture = join(root, "wuxr-codex-home-legacy-future");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([mkdir(marked), mkdir(legacyFuture)]);
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      await Bun.write(join(root, `${basename(marked)}.wuxr-last-use`), "");
+      await Promise.all([
+        utimes(join(root, `${basename(marked)}.wuxr-last-use`), old, old),
+        utimes(marked, future, future),
+        utimes(legacyFuture, future, future),
+      ]);
+      const home = await prepareIsolatedCodexHome(async () => new Set());
+      await home.cleanup();
+      expect(await Bun.file(marked).exists()).toBe(false);
+      // An unmarked legacy timestamp in the future is clamped to now: it is
+      // kept now, but cannot extend retention beyond one cutoff from this run.
+      expect((await lstat(legacyFuture)).isDirectory()).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("adopts a future-dated legacy home once, then expires it from that first-seen time", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const legacy = join(root, "wuxr-codex-home-legacy-future");
+    const marker = join(root, `${basename(legacy)}.wuxr-last-use`);
+    try {
+      await mkdir(root, { recursive: true });
+      await mkdir(legacy);
+      const future = new Date(initialNow + 10 * 365 * 24 * 60 * 60 * 1000);
+      await utimes(legacy, future, future);
+      const first = await prepareIsolatedCodexHome(async () => new Set());
+      await first.cleanup();
+      expect((await stat(marker)).mtimeMs).toBeCloseTo(initialNow, -2);
+      clock.mockReturnValue(initialNow + 24 * 60 * 60 * 1000 + 1);
+      const second = await prepareIsolatedCodexHome(async () => new Set());
+      await second.cleanup();
+      expect(await Bun.file(legacy).exists()).toBe(false);
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("prunes stale orphan markers without following links", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const orphan = join(root, "wuxr-codex-home-orphan.wuxr-last-use");
+    try {
+      await mkdir(root, { recursive: true });
+      await Bun.write(orphan, "");
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await utimes(orphan, old, old);
+      const home = await prepareIsolatedCodexHome(async () => new Set());
+      await home.cleanup();
+      expect(await Bun.file(orphan).exists()).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizes a future-dated orphan marker once without changing an in-range orphan", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "codex-homes");
+    const future = join(root, "wuxr-codex-home-future-orphan.wuxr-last-use");
+    const inRange = join(root, "wuxr-codex-home-in-range-orphan.wuxr-last-use");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([Bun.write(future, ""), Bun.write(inRange, "")]);
+      const futureTime = new Date(initialNow + 10 * 365 * 24 * 60 * 60 * 1000);
+      const inRangeTime = new Date(initialNow - 60 * 60 * 1000);
+      await Promise.all([
+        utimes(future, futureTime, futureTime),
+        utimes(inRange, inRangeTime, inRangeTime),
+      ]);
+
+      const first = await prepareIsolatedCodexHome(async () => new Set());
+      await first.cleanup();
+      expect((await stat(future)).mtimeMs).toBeCloseTo(initialNow, -2);
+      expect((await stat(inRange)).mtimeMs).toBeCloseTo(inRangeTime.getTime(), -2);
+
+      clock.mockReturnValue(initialNow + 24 * 60 * 60 * 1000 + 1);
+      const second = await prepareIsolatedCodexHome(async () => new Set());
+      await second.cleanup();
+      await expect(lstat(future)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(inRange)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
     }
   });
 
@@ -2695,16 +3166,117 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
 });
 
 describe("prepareReviewerCwd (real fs)", () => {
+  test("prunes only stale unreferenced reviewer cwd directories", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    const initialNow = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(initialNow);
+    process.env.XDG_STATE_HOME = state;
+    const root = join(state, "wux-review", "reviewer-cwds");
+    const stale = join(root, "wuxr-reviewer-cwd-stale");
+    const referenced = join(root, "wuxr-reviewer-cwd-referenced");
+    const fresh = join(root, "wuxr-reviewer-cwd-fresh");
+    const nonPrefix = join(root, "other-stale-directory");
+    const outside = join(state, "outside-reviewer-cwd");
+    const link = join(root, "wuxr-reviewer-cwd-link");
+    try {
+      await mkdir(root, { recursive: true });
+      await Promise.all([
+        mkdir(stale),
+        mkdir(referenced),
+        mkdir(fresh),
+        mkdir(nonPrefix),
+        mkdir(outside),
+      ]);
+      const old = new Date(initialNow - 25 * 60 * 60 * 1000);
+      const recent = new Date(initialNow - 60 * 60 * 1000);
+      await Promise.all([
+        utimes(stale, old, old),
+        utimes(referenced, old, old),
+        utimes(fresh, recent, recent),
+        utimes(nonPrefix, old, old),
+        utimes(outside, old, old),
+        symlink(outside, link),
+      ]);
+      const outsideBefore = (await stat(outside)).mtimeMs;
+
+      const cwd = await prepareReviewerCwd(undefined, async () => new Set([referenced]));
+      await cwd.cleanup();
+
+      expect(await Bun.file(stale).exists()).toBe(false);
+      expect((await lstat(referenced)).isDirectory()).toBe(true);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      expect((await stat(outside)).mtimeMs).toBe(outsideBefore);
+      expect((await lstat(nonPrefix)).isDirectory()).toBe(true);
+      expect((await lstat(fresh)).isDirectory()).toBe(true);
+    } finally {
+      clock.mockRestore();
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a cwd within the configured Claude maximum-timeout retention window", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const priorState = process.env.XDG_STATE_HOME;
+    const priorMax = process.env.WUX_REVIEW_CLAUDE_MAX_TIMEOUT_MS;
+    process.env.XDG_STATE_HOME = state;
+    process.env.WUX_REVIEW_CLAUDE_MAX_TIMEOUT_MS = String(13 * 60 * 60 * 1000);
+    const root = join(state, "wux-review", "reviewer-cwds");
+    const live = join(root, "wuxr-reviewer-cwd-live");
+    try {
+      await mkdir(root, { recursive: true });
+      await mkdir(live);
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await utimes(live, old, old);
+      const cwd = await prepareReviewerCwd();
+      expect((await lstat(live)).isDirectory()).toBe(true);
+      await cwd.cleanup();
+    } finally {
+      if (priorState === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = priorState;
+      if (priorMax === undefined) delete process.env.WUX_REVIEW_CLAUDE_MAX_TIMEOUT_MS;
+      else process.env.WUX_REVIEW_CLAUDE_MAX_TIMEOUT_MS = priorMax;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
+  test("creates Claude cwd under the shared state root rather than tmpdir", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const cwd = await prepareReviewerCwd();
+      expect(cwd.path).toStartWith(`${join(state, "wux-review", "reviewer-cwds")}/wuxr-reviewer-cwd-`);
+      expect((await stat(dirname(cwd.path))).mode & 0o777).toBe(0o700);
+      await cwd.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
   test("creates a unique mode-0700 directory per leg and removes each on teardown", async () => {
-    const first = await prepareReviewerCwd();
-    const second = await prepareReviewerCwd();
-    expect(first.path).not.toBe(second.path);
-    expect((await stat(first.path)).mode & 0o777).toBe(0o700);
-    expect((await stat(second.path)).mode & 0o777).toBe(0o700);
-    await first.cleanup();
-    await second.cleanup();
-    expect(await Bun.file(first.path).exists()).toBe(false);
-    expect(await Bun.file(second.path).exists()).toBe(false);
+    const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const first = await prepareReviewerCwd();
+      const second = await prepareReviewerCwd();
+      expect(first.path).not.toBe(second.path);
+      expect((await stat(first.path)).mode & 0o777).toBe(0o700);
+      expect((await stat(second.path)).mode & 0o777).toBe(0o700);
+      await first.cleanup();
+      await second.cleanup();
+      expect(await Bun.file(first.path).exists()).toBe(false);
+      expect(await Bun.file(second.path).exists()).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
   });
 });
 

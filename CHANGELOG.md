@@ -11,6 +11,16 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+- **Durable Claude cwd and Codex-home retention.** Observable Claude legs now
+  use a private state-root working directory rather than a system temporary
+  directory, and report if it disappears during a leg. Codex-home pruning now
+  uses a last-use marker, a timeout-aware cutoff, and durable round references
+  so it cannot reclaim an active or recoverable leg's home. Invalid or
+  future-dated markers, including orphan markers, are safely normalized so
+  abandoned homes expire from first sight, and stale unreferenced reviewer cwds
+  are pruned at the next leg start. Reconciliation continues to clean the
+  immediately previous release's exact temporary reviewer-cwd shape.
+
 ## 2026.10.26
 
 ### Fixed

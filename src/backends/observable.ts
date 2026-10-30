@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -25,7 +25,7 @@ import {
   machineStreamChunkRecord,
   type ParsedMachineEvent,
 } from "./observable-events";
-import { codexHomeRoot } from "./codex-home";
+import { codexHomeRoot, reviewerCwdRoot } from "./codex-home";
 
 const WUX_COMMAND_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -70,9 +70,16 @@ export interface ObservableRunResult {
 
 export type ObservableRun = (cmd: string[], opts: ObservableRunOptions) => Promise<ObservableRunResult>;
 
+interface ObservableLstat {
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+  uid: number | bigint;
+}
+
 export interface ObservableAdapterDeps {
   run: ObservableRun;
   mkdir: (path: string) => Promise<void>;
+  lstat: (path: string) => Promise<ObservableLstat>;
   rm: (path: string) => Promise<void>;
   writeFile: (path: string, content: string) => Promise<void>;
   writePrivateFile: (path: string, content: string) => Promise<void>;
@@ -197,6 +204,7 @@ export function defaultObservableDeps(run: ObservableRun): ObservableAdapterDeps
   return {
     run,
     mkdir: (path) => mkdir(path, { recursive: true }).then(() => undefined),
+    lstat,
     rm: (path) => rm(path, { recursive: true, force: true }).then(() => undefined),
     writeFile: (path, content) => Bun.write(path, content).then(() => undefined),
     writePrivateFile: (path, content) => writeFile(path, content, {
@@ -559,6 +567,7 @@ export function buildObservableWrapperScript(paths: {
   recoveryOutputPath?: string;
   cleanupFiles?: string[];
   cleanupDir?: string;
+  cwd?: string;
 }): string {
   const redir = paths.stdinPath === undefined ? "< /dev/null" : `< ${shq(paths.stdinPath)}`;
   const command = paths.envPath === undefined
@@ -571,6 +580,8 @@ export function buildObservableWrapperScript(paths: {
   // A simple-command PATH assignment is scoped to that helper invocation and
   // never changes the environment reconstructed for the reviewer below.
   const helper = "PATH=/usr/bin:/bin";
+  const legacyCleanupDir = paths.cleanupDir !== undefined
+    && isLegacyReviewerCwd(paths.cleanupDir);
   const releaseAckToken = paths.releaseAckToken ?? "released";
   const timedInvoke = paths.timeoutPath === undefined || paths.timeoutMs === undefined
     ? [invoke, "__rc=$?"]
@@ -638,9 +649,46 @@ export function buildObservableWrapperScript(paths: {
         ...(paths.cleanupFiles ?? []).map((path) => `  ${helper} rm -f -- ${shq(path)}`),
         ...(paths.cleanupDir === undefined
           ? []
-          : [`  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`]),
+          : legacyCleanupDir
+            ? [
+                // The previous release created this exact tmpdir child. Check
+                // the link type before recursion: unlink a legacy symlink
+                // without traversing its target, matching recovery cleanup.
+                `  if [ -L ${shq(paths.cleanupDir)} ]; then`,
+                `    ${helper} rm -f -- ${shq(paths.cleanupDir)}`,
+                `  elif [ -d ${shq(paths.cleanupDir)} ] && [ -O ${shq(paths.cleanupDir)} ]; then`,
+                `    ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
+                "  fi",
+              ]
+            : [
+              `  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
+              ...(codexHomeMarkerForCleanup(paths.cleanupDir) === undefined
+                ? []
+                : [`  ${helper} rm -f -- ${shq(codexHomeMarkerForCleanup(paths.cleanupDir)!)}`]),
+            ]),
         "}",
         "trap __cleanup_observable EXIT",
+      ];
+  const cwdCheckedInvoke = paths.cwd === undefined
+    ? timedInvoke
+    : [
+        `__wuxr_cwd=${shq(paths.cwd)}`,
+        `__wuxr_evidence=$(${helper} cat ${shq(paths.readyPath)})`,
+        'if [ ! -d "$__wuxr_cwd" ]; then',
+        '  printf \'{"type":"reviewer-cwd","phase":"before","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        `  printf %s ${shq(`claude reviewer: working directory ${paths.cwd} was removed before the leg`)} > ${shq(paths.stderrPath)}`,
+        "  __rc=125",
+        "else",
+        '  printf \'{"type":"reviewer-cwd","phase":"before","exists":true}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        ...timedInvoke,
+        '  if [ ! -d "$__wuxr_cwd" ]; then',
+        '    printf \'{"type":"reviewer-cwd","phase":"after","exists":false}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        `    printf '\\n%s' ${shq(`claude reviewer: working directory ${paths.cwd} was removed during the leg`)} >> ${shq(paths.stderrPath)}`,
+        "    __rc=125",
+        "  else",
+        '    printf \'{"type":"reviewer-cwd","phase":"after","exists":true}\\n\' >> "$__wuxr_evidence/events.jsonl"',
+        "  fi",
+        "fi",
       ];
   const parentGuard = [
     `  if [ ! -e ${shq(paths.argsPath)} ]; then exit 126; fi`,
@@ -720,13 +768,20 @@ export function buildObservableWrapperScript(paths: {
         ]),
     ...pane,
     ...cleanup,
-    ...timedInvoke,
+    ...cwdCheckedInvoke,
     ...preserveOutput,
     'printf %s "$__rc" > ' + shq(`${paths.donePath}.tmp`),
     `${helper} mv ${shq(`${paths.donePath}.tmp`)} ${shq(paths.donePath)}`,
     ...release,
     "",
   ].join("\n");
+}
+
+function codexHomeMarkerForCleanup(dir: string): string | undefined {
+  const root = resolve(codexHomeRoot());
+  const candidate = resolve(dir);
+  if (dirname(candidate) !== root || !basename(candidate).startsWith("wuxr-codex-home-")) return undefined;
+  return join(root, `${basename(candidate)}.wuxr-last-use`);
 }
 
 export async function runObservableLeg(
@@ -873,6 +928,7 @@ export async function runObservableLeg(
         recoveryOutputPath: input.outputPath === undefined ? undefined : recoveryOutputPath,
         cleanupFiles: input.cleanupFiles,
         cleanupDir: input.cleanupDir,
+        cwd: input.reviewer === "claude" ? input.cwd : undefined,
         releaseAckToken: resultId,
         parentPid: process.pid,
       }),
@@ -3014,13 +3070,51 @@ function isValidCodexCleanupDir(dir: string): boolean {
     && dirname(home) === root
     && basename(home).startsWith("wuxr-codex-home-")
   ) || (
-    // Claude still creates its independently-isolated cwd under tmpdir(). This
-    // is the only production non-Codex-home cleanup shape; accepting the exact
-    // direct child prefix preserves interruption cleanup without admitting a
-    // temp CODEX_HOME or arbitrary temporary path.
-    dirname(candidate) === resolve(tmpdir())
+    // Claude owns a sibling private state root. Restrict this to an immediate
+    // own-prefix child so observable cleanup can never recurse through a shared
+    // state directory or accept a lookalike nested path.
+    dirname(candidate) === resolve(reviewerCwdRoot())
     && name.startsWith("wuxr-reviewer-cwd-")
+  ) || isLegacyReviewerCwd(dir);
+}
+
+function isLegacyReviewerCwd(dir: string): boolean {
+  if (!isAbsolute(dir) || dir === "/" || resolve(dir) !== dir) return false;
+  const candidate = resolve(dir);
+  return (
+    dirname(candidate) === resolve(tmpdir())
+    && basename(candidate).startsWith("wuxr-reviewer-cwd-")
   );
+}
+
+// Legacy Claude cwd paths were stored in durable journals by 2026.10.26.
+// New legs never use them, but recovery must remove the exact old shape. lstat
+// prevents recursive removal through a link; a legacy symlink is unlinked, not
+// followed, so its target is untouched.
+export async function removeObservableCleanupDir(
+  deps: ObservableAdapterDeps,
+  dir: string,
+): Promise<void> {
+  if (!isLegacyReviewerCwd(dir)) {
+    await deps.rm(dir);
+    return;
+  }
+  let metadata: ObservableLstat;
+  try {
+    metadata = await deps.lstat(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (metadata.isSymbolicLink()) {
+    await deps.rm(dir);
+    return;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (!metadata.isDirectory() || (uid !== undefined && metadata.uid !== uid)) {
+    throw new WuxReviewError("unsafe legacy observable cleanup directory");
+  }
+  await deps.rm(dir);
 }
 
 function shq(path: string): string {

@@ -44,7 +44,9 @@ hardened for transient load failures:
 
 - **Contained reviewer processes.** Each leg runs in its own freshly created
   mode-0700 working directory, never the reviewed repository or a shared,
-  attacker-plantable temp path; the complete diff is already in the supplied
+  attacker-plantable temp path; Claude's cwd is under the private state-root
+  `reviewer-cwds` directory and is removed by its owner, by reconciliation after
+  an interrupted observable parent, or by stale-cwd pruning at the next reviewer-leg start. The complete diff is already in the supplied
   prompt. Claude uses safe mode, an empty built-in tool set, strict empty MCP
   configuration, disabled skills, and no session persistence while retaining
   OAuth/keychain or API-key auth. Codex keeps `-s read-only`, `--ephemeral`, and

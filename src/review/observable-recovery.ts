@@ -9,6 +9,7 @@ import {
   defaultObservableDeps,
   discardPreparedObservableLeg,
   discardObservableLeg,
+  removeObservableCleanupDir,
   reconcileObservableLeg,
   type ObservableAdapterDeps,
   type ObservableLegResult,
@@ -514,7 +515,7 @@ async function cleanupSharedRecoveryResources(
     if (record.cleanupDir !== undefined) paths.add(record.cleanupDir);
   }
   try {
-    await Promise.all([...paths].map((path) => observable.rm(path)));
+    await Promise.all([...paths].map((path) => removeObservableCleanupDir(observable, path)));
   } catch (error) {
     throw new WuxReviewError(
       `observable shared recovery cleanup failed: ${errorDetail(error)}`,
