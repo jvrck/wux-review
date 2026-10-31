@@ -427,5 +427,5 @@ function shaValue(argv: string[], i: number, flag: string): string {
   if (!/^[0-9a-f]{40}$/i.test(sha)) {
     throw new WuxReviewError(`${flag} requires a full 40-hex SHA`);
   }
-  return sha;
+  return sha.toLowerCase();
 }

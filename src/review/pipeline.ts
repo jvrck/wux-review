@@ -71,10 +71,11 @@ export interface ReviewDeps {
 }
 
 export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Promise<VerdictEnvelope> {
+  const expectHead = input.expectHead?.toLowerCase();
   if (input.ref !== undefined && input.pr !== undefined) {
     throw new WuxReviewError("provide either a ref or pr, not both");
   }
-  if (input.expectHead !== undefined && input.pr === undefined) {
+  if (expectHead !== undefined && input.pr === undefined) {
     throw new WuxReviewError("expect_head requires pr");
   }
   throwIfObservableReviewAborted(input);
@@ -85,7 +86,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   const target = resolveTarget({
     ref: input.ref,
     pr: input.pr,
-    expectHead: input.expectHead,
+    expectHead,
     headWaitMs: config.prHeadWaitSeconds === undefined ? undefined : config.prHeadWaitSeconds * 1000,
   });
   const getDiff = deps.getDiff ?? defaultGetDiff;

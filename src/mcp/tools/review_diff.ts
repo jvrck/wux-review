@@ -31,7 +31,7 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
     },
     async ({ ref, pr, expect_head, lenses, post_to_pr, session }) => {
       const envelope = await runReview(
-        { ref, pr, expectHead: expect_head, lenses, session },
+        { ref, pr, expectHead: expect_head?.toLowerCase(), lenses, session },
         {
           runReviewers: deps.runReviewers,
           loadConfig: deps.loadConfig,

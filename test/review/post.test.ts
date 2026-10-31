@@ -45,6 +45,9 @@ function harness(existing: { claude?: string; codex?: string; legacy?: string } 
             : undefined;
       return ok(id ? `${id}\n` : "");
     }
+    if (cmd.includes("POST")) {
+      return ok(`${bodyArg(cmd).includes("dual-review:claude") ? "https://example.invalid/comments/claude-new" : "https://example.invalid/comments/codex-new"}\n`);
+    }
     return ok("");
   };
   return { run, calls };
@@ -82,8 +85,8 @@ describe("postToPr", () => {
     expect(bodies.every((body) => body.includes("<!-- dual-review:round=2 -->"))).toBe(true);
     const patches = findAll(calls, "PATCH");
     expect(patches).toHaveLength(2);
-    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/111"))!)).toBe(`body=<!-- dual-review:claude -->\n> Superseded by round 2: \n${oldClaude}`);
-    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/222"))!)).toBe(`body=<!-- dual-review:codex -->\n> Superseded by round 2: \n${oldCodex}`);
+    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/111"))!)).toBe(`body=<!-- dual-review:claude -->\n> Superseded by round 2: https://example.invalid/comments/claude-new\n${oldClaude}`);
+    expect(bodyArg(patches.find((call) => call.join(" ").includes("comments/222"))!)).toBe(`body=<!-- dual-review:codex -->\n> Superseded by round 2: https://example.invalid/comments/codex-new\n${oldCodex}`);
   });
 
   test("upgrades an unnumbered historical pair to round 2, not round 3", async () => {
@@ -91,6 +94,14 @@ describe("postToPr", () => {
     const results = await postToPr(42, ENV, run, () => AT);
     expect(results.every((result) => result.round === 2)).toBe(true);
     expect(findAll(calls, "POST").every((call) => bodyArg(call).includes("<!-- dual-review:round=2 -->"))).toBe(true);
+  });
+
+  test("reads a legacy round only from its header, not finding text or a pointer", async () => {
+    const oldClaude = "> Superseded by round 9: https://example.invalid/old\n**Dual-review (claude) — round 2 · updated now · verdict: clean**\n- finding says round 7";
+    const oldCodex = "> Superseded by round 9: https://example.invalid/old\n**Dual-review (codex) — round 2 · updated now · verdict: clean**\n- finding says round 7";
+    const { run } = harness({ claude: oldClaude, codex: oldCodex });
+    const results = await postToPr(42, ENV, run, () => AT);
+    expect(results.every((result) => result.round === 3)).toBe(true);
   });
 
   test("scopes each lookup to our own comments (author check), without --slurp", async () => {

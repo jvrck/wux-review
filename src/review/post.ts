@@ -123,7 +123,9 @@ async function reviewerComments(run: Run, repo: string, viewer: string, pr: numb
 function commentRound(comment: ReviewerComment): number | undefined {
   const machine = comment.body.match(/^<!-- dual-review:round=(\d+) -->$/m);
   if (machine !== null) return Number(machine[1]);
-  const visible = comment.body.match(/\bround (\d+)\b/);
+  // Legacy comments lack a machine round marker. Read only their visible
+  // dual-review header, never a finding or an already-inserted pointer.
+  const visible = comment.body.match(/^\*\*Dual-review \((?:claude|codex)\) — round (\d+) ·/m);
   return visible === null ? undefined : Number(visible[1]);
 }
 

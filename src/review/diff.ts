@@ -32,7 +32,7 @@ export async function getDiff(target: Target, run: Run = defaultRun, pause: Slee
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const expected = target.expectHead ?? await localExpectedHead(target.pr, run);
+      const expected = target.expectHead?.toLowerCase() ?? await localExpectedHead(target.pr, run);
       const firstHead = await waitForHead(target.pr, expected, target.headWaitMs ?? DEFAULT_HEAD_WAIT_MS, run, pause);
       let fetched = await fetchPrDiff(target.pr, run);
       let finalHead = await prHead(target.pr, run);
@@ -47,8 +47,8 @@ export async function getDiff(target: Target, run: Run = defaultRun, pause: Slee
         const refetchHead = finalHead;
         fetched = await fetchPrDiff(target.pr, run);
         finalHead = await prHead(target.pr, run);
-        if (finalHead !== (expected ?? refetchHead)) {
-          throw headMismatch(target.pr, finalHead, expected ?? refetchHead);
+        if (finalHead !== refetchHead) {
+          throw headMismatch(target.pr, finalHead, refetchHead);
         }
       }
       return { ...finalize(fetched.diff, splitLines(fetched.names)), head: finalHead };
@@ -95,27 +95,25 @@ async function fetchPrDiff(pr: number, run: Run): Promise<{ diff: string; names:
 async function localExpectedHead(pr: number, run: Run): Promise<string | undefined> {
   // This is an optional convenience only. Every local-git failure deliberately
   // falls back to an unpinned PR review, preserving non-checkout use.
-  const details = await capture(run, ["gh", "pr", "view", String(pr), "--json", "headRefName,headRepository"]);
+  const details = await tryCapture(run, ["gh", "pr", "view", String(pr), "--json", "headRefName,headRepository"]);
+  if (details === undefined) return undefined;
   let remote: { headRefName?: unknown; headRepository?: { nameWithOwner?: unknown } | null };
   try {
     remote = JSON.parse(details) as { headRefName?: unknown; headRepository?: { nameWithOwner?: unknown } | null };
-  } catch {
-    throw new WuxReviewError(`PR #${pr}: gh returned invalid head metadata`);
-  }
+  } catch { return undefined; }
   if (typeof remote.headRefName !== "string" || typeof remote.headRepository?.nameWithOwner !== "string") {
     return undefined;
   }
   const branch = await tryCapture(run, ["git", "branch", "--show-current"]);
   if (branch?.trim() === "" || branch?.trim() !== remote.headRefName) return undefined;
-  const upstream = await tryCapture(run, ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
-  const remoteName = upstream?.trim().split("/")[0];
+  const remoteName = (await tryCapture(run, ["git", "config", "--get", `branch.${branch.trim()}.remote`]))?.trim();
   if (remoteName === undefined || remoteName === "") return undefined;
   const remoteUrl = await tryCapture(run, ["git", "remote", "get-url", remoteName]);
   if (remoteUrl === undefined || repositoryFromRemoteUrl(remoteUrl.trim()) !== remote.headRepository.nameWithOwner.toLowerCase()) {
     return undefined;
   }
   const local = await tryCapture(run, ["git", "rev-parse", "HEAD"]);
-  return local?.trim() || undefined;
+  return local?.trim().toLowerCase() || undefined;
 }
 
 async function tryCapture(run: Run, cmd: string[]): Promise<string | undefined> {
@@ -140,7 +138,7 @@ async function waitForHead(pr: number, expected: string | undefined, timeoutMs: 
 }
 
 async function prHead(pr: number, run: Run): Promise<string> {
-  const head = (await capture(run, ["gh", "pr", "view", String(pr), "--json", "headRefOid", "--jq", ".headRefOid"])).trim();
+  const head = (await capture(run, ["gh", "pr", "view", String(pr), "--json", "headRefOid", "--jq", ".headRefOid"])).trim().toLowerCase();
   if (head === "") throw new WuxReviewError(`PR #${pr}: GitHub returned no head SHA`);
   return head;
 }

@@ -33,6 +33,16 @@ describe("getDiff", () => {
     expect(head).toBe("abc123");
   });
 
+  test("compares expected heads case-insensitively", async () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    const run = mockRun({
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok(`${sha}\n`),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42, expectHead: sha.toUpperCase() }, run)).resolves.toMatchObject({ head: sha });
+  });
+
   test("polls until GitHub exposes the expected pushed head", async () => {
     const heads = ["old", "expected", "expected"];
     const run: Run = async (cmd) => {
@@ -61,7 +71,7 @@ describe("getDiff", () => {
     const run = mockRun({
       "gh pr view 42 --json headRefName,headRepository": ok('{"headRefName":"feature","headRepository":{"nameWithOwner":"owner/repo"}}\n'),
       "git branch --show-current": ok("feature\n"),
-      "git rev-parse --abbrev-ref --symbolic-full-name @{upstream}": ok("origin/feature\n"),
+      "git config --get branch.feature.remote": ok("origin\n"),
       "git remote get-url origin": ok("git@example.invalid:owner/repo.git\n"),
       "git rev-parse HEAD": ok("abc123\n"),
       "gh pr view 42 --json headRefOid --jq .headRefOid": ok("abc123\n"),
@@ -75,7 +85,7 @@ describe("getDiff", () => {
     const run = mockRun({
       "gh pr view 42 --json headRefName,headRepository": ok('{"headRefName":"patch","headRepository":{"nameWithOwner":"fork/repo"}}\n'),
       "git branch --show-current": ok("patch\n"),
-      "git rev-parse --abbrev-ref --symbolic-full-name @{upstream}": ok("origin/patch\n"),
+      "git config --get branch.patch.remote": ok("origin\n"),
       "git remote get-url origin": ok("git@example.invalid:upstream/repo.git\n"),
       "gh pr view 42 --json headRefOid --jq .headRefOid": ok("forkhead\n"),
       "gh pr diff 42": ok(SAMPLE_DIFF),
@@ -95,11 +105,24 @@ describe("getDiff", () => {
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "head" });
   });
 
-  test("fails cleanly when GitHub returns malformed local-head metadata", async () => {
+  test("falls back to an unpinned review when GitHub local-head metadata fails", async () => {
     const run = mockRun({
       "gh pr view 42 --json headRefName,headRepository": ok("not json\n"),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("head\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
     });
-    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow("invalid head metadata");
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "head" });
+  });
+
+  test("falls back to an unpinned review when GitHub local-head lookup exits non-zero", async () => {
+    const run = mockRun({
+      "gh pr view 42 --json headRefName,headRepository": fail("temporary API failure", 1),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("head\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "head" });
   });
 
   test("refetches once if an unpinned PR head moves during the two diff calls", async () => {
