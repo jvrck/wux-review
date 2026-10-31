@@ -11,6 +11,8 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+## 2026.10.31
+
 ### Added
 
 - **Discoverable lens configuration.** `--help`, command documentation, MCP
@@ -22,6 +24,18 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 - **Structured issue authoring.** New Task, Bug, and Feature templates disable
   blank issues and pre-fill the required issue format. Contribution guidance now
   describes the title, section, scope, and private security-reporting rules.
+
+### Changed
+
+- **Shorter preview artifact retention.** Pull-request preview artifacts now
+  expire after 3 days. Push to the pull request again or run the preview
+  workflow manually to rebuild an expired artifact.
+
+### Breaking changes
+
+- **Reserved `default` lens name.** A configuration that defines an
+  `extra_lenses` entry named `default` is now rejected because `default` names
+  the built-in lens-set alias.
 
 ## 2026.10.26
 

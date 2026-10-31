@@ -72,4 +72,4 @@ jobs:
             dist/wux-review-*
             dist/SHA256SUMS
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
