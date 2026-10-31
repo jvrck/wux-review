@@ -26,7 +26,15 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const diff = await capture(run, ["gh", "pr", "diff", String(target.pr)]);
+      const diffCommand = ["gh", "pr", "diff", String(target.pr)];
+      const diffResult = await run(diffCommand);
+      if (diffResult.code !== 0) {
+        if (isPrDiffTooLarge(diffResult.stderr)) {
+          return getLocalPrDiff(target.pr, diffResult.stderr, run);
+        }
+        throw captureError(diffCommand, diffResult.stderr, diffResult.code);
+      }
+      const diff = diffResult.stdout;
       const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
       return finalize(diff, splitLines(names));
     }
@@ -60,6 +68,90 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       }
       return finalize(diff, files);
     }
+  }
+}
+
+interface PrRefs {
+  baseRefOid: string;
+  headRefOid: string;
+  baseRefName: string;
+}
+
+// GitHub declines PR patches that exceed its diff size limits (files or lines).
+// Only an explicit size-limit message triggers a local fallback: authentication,
+// network, and other HTTP failures retain the normal `gh pr diff` failure path.
+function isPrDiffTooLarge(stderr: string): boolean {
+  const detail = stderr.toLowerCase();
+  return detail.includes("maximum number of files") || detail.includes("maximum number of lines") || detail.includes("too_large");
+}
+
+async function getLocalPrDiff(pr: number, ghError: string, run: Run): Promise<ReviewDiff> {
+  const refs = await getPrRefs(pr, run);
+  for (const sha of [refs.baseRefOid, refs.headRefOid]) {
+    const object = await run(["git", "cat-file", "-e", `${sha}^{commit}`]);
+    if (object.code !== 0) {
+      throw new WuxReviewError(
+        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)} # (use the remote that hosts the PR's base repository if it is not origin)`,
+      );
+    }
+  }
+
+  // This is the shared-history check before using the three-dot form. The range
+  // helpers below preserve ordinary local-range path handling, while three-dot
+  // keeps GitHub's base...head meaning.
+  await requireMergeBase(pr, refs, run);
+  const range = `${refs.baseRefOid}...${refs.headRefOid}`;
+  const reason = ghError.trim().split("\n")[0] || "gh pr diff failed";
+  process.stderr.write(
+    `wux-review: PR #${pr} exceeds GitHub's diff size limit (${reason}); reviewing ${range} from local git\n`,
+  );
+  return finalize(await gitDiff(run, [range]), await gitNames(run, [range]));
+}
+
+async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
+  const command = ["gh", "pr", "view", String(pr), "--json", "baseRefOid,headRefOid,baseRefName"];
+  const text = await capture(run, command);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid JSON response`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing base or head commit information`);
+  }
+  const refs = parsed as Record<string, unknown>;
+  const { baseRefOid, headRefOid, baseRefName } = refs;
+  if (
+    typeof baseRefOid !== "string" ||
+    typeof headRefOid !== "string" ||
+    typeof baseRefName !== "string"
+  ) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing base or head commit information`);
+  }
+  if (!isFullObjectId(baseRefOid)) {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid baseRefOid`);
+  }
+  if (!isFullObjectId(headRefOid)) {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid headRefOid`);
+  }
+  return { baseRefOid, headRefOid, baseRefName };
+}
+
+function isFullObjectId(value: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function requireMergeBase(pr: number, refs: PrRefs, run: Run): Promise<void> {
+  const result = await run(["git", "-c", "core.quotePath=false", "merge-base", refs.baseRefOid, refs.headRefOid]);
+  if (result.code !== 0) {
+    throw new WuxReviewError(
+      `PR #${pr} history is not available locally; run: git fetch --unshallow`,
+    );
   }
 }
 
@@ -100,10 +192,14 @@ async function noIndexDiff(run: Run, file: string): Promise<string> {
 async function capture(run: Run, cmd: string[]): Promise<string> {
   const result = await run(cmd);
   if (result.code !== 0) {
-    const detail = result.stderr.trim() || `exit ${result.code}`;
-    throw new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
+    throw captureError(cmd, result.stderr, result.code);
   }
   return result.stdout;
+}
+
+function captureError(cmd: string[], stderr: string, code: number): WuxReviewError {
+  const detail = stderr.trim() || `exit ${code}`;
+  return new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
 }
 
 function splitNul(out: string): string[] {
