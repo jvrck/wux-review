@@ -91,15 +91,15 @@ async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
     const object = await run(["git", "cat-file", "-e", `${sha}^{commit}`]);
     if (object.code !== 0) {
       throw new WuxReviewError(
-        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${refs.baseRefName} pull/${pr}/head`,
+        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`,
       );
     }
   }
 
-  // Calculate the merge-base explicitly before using the three-dot form. The
-  // range helpers below preserve the same path handling as an ordinary local
-  // range review, while the three-dot range keeps GitHub's base...head meaning.
-  await gitOut(run, ["merge-base", refs.baseRefOid, refs.headRefOid]);
+  // This is the shared-history check before using the three-dot form. The range
+  // helpers below preserve ordinary local-range path handling, while three-dot
+  // keeps GitHub's base...head meaning.
+  await requireMergeBase(pr, refs, run);
   const range = `${refs.baseRefOid}...${refs.headRefOid}`;
   process.stderr.write(
     `wux-review: PR #${pr} exceeds GitHub's diff file limit; reviewing ${range} from local git\n`,
@@ -116,16 +116,42 @@ async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
   } catch {
     throw new WuxReviewError(`gh pr view ${pr}: invalid JSON response`);
   }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing base or head commit information`);
+  }
+  const refs = parsed as Record<string, unknown>;
+  const { baseRefOid, headRefOid, baseRefName } = refs;
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    typeof (parsed as Record<string, unknown>).baseRefOid !== "string" ||
-    typeof (parsed as Record<string, unknown>).headRefOid !== "string" ||
-    typeof (parsed as Record<string, unknown>).baseRefName !== "string"
+    typeof baseRefOid !== "string" ||
+    typeof headRefOid !== "string" ||
+    typeof baseRefName !== "string"
   ) {
     throw new WuxReviewError(`gh pr view ${pr}: missing base or head commit information`);
   }
-  return parsed as PrRefs;
+  if (!isFullObjectId(baseRefOid)) {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid baseRefOid`);
+  }
+  if (!isFullObjectId(headRefOid)) {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid headRefOid`);
+  }
+  return { baseRefOid, headRefOid, baseRefName };
+}
+
+function isFullObjectId(value: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function requireMergeBase(pr: number, refs: PrRefs, run: Run): Promise<void> {
+  const result = await run(["git", "-c", "core.quotePath=false", "merge-base", refs.baseRefOid, refs.headRefOid]);
+  if (result.code !== 0) {
+    throw new WuxReviewError(
+      `PR #${pr} history is not available locally; run: git fetch --deepen=<n> or git fetch --unshallow`,
+    );
+  }
 }
 
 function finalize(diff: string, files: string[]): ReviewDiff {

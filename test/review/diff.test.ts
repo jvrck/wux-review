@@ -19,7 +19,11 @@ function mockRun(table: Record<string, RunResult>): Run {
 }
 
 const SAMPLE_DIFF = "diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n";
-const PR_REFS = { baseRefOid: "base123", headRefOid: "head456", baseRefName: "main" };
+const PR_REFS = {
+  baseRefOid: "0123456789abcdef0123456789abcdef01234567",
+  headRefOid: "89abcdef0123456789abcdef0123456789abcdef",
+  baseRefName: "main",
+};
 
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
   const writes: string[] = [];
@@ -51,9 +55,9 @@ describe("getDiff", () => {
     const run = mockRun({
       "gh pr diff 42": fail("HTTP 406: the diff exceeded the maximum number of files", 1),
       "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
-      "git cat-file -e base123^{commit}": ok(""),
-      "git cat-file -e head456^{commit}": ok(""),
-      "git -c core.quotePath=false merge-base base123 head456": ok("base123\n"),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git -c core.quotePath=false merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok("base\n"),
       [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
       [`git -c core.quotePath=false diff -z --name-only ${range}`]: z("x.ts", "sub/y.ts"),
     });
@@ -76,10 +80,10 @@ describe("getDiff", () => {
     const run = mockRun({
       "gh pr diff 42": fail("too_large", 1),
       "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
-      "git cat-file -e base123^{commit}": fail("missing object", 1),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("missing object", 1),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "PR #42 is too large for gh pr diff and base123 isn't available locally; run: git fetch origin main pull/42/head",
+      "PR #42 is too large for gh pr diff and 0123456789abcdef0123456789abcdef01234567 isn't available locally; run: git fetch origin 'main' 'pull/42/head'",
     );
   });
 
@@ -87,11 +91,60 @@ describe("getDiff", () => {
     const run = mockRun({
       "gh pr diff 42": fail("maximum number of files", 1),
       "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
-      "git cat-file -e base123^{commit}": ok(""),
-      "git cat-file -e head456^{commit}": fail("missing object", 1),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": fail("missing object", 1),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "PR #42 is too large for gh pr diff and head456 isn't available locally; run: git fetch origin main pull/42/head",
+      "PR #42 is too large for gh pr diff and 89abcdef0123456789abcdef0123456789abcdef isn't available locally; run: git fetch origin 'main' 'pull/42/head'",
+    );
+  });
+
+  test("quotes shell-sensitive branch names in the fetch hint", async () => {
+    const refs = { ...PR_REFS, baseRefName: "topic;$(echo unsafe) space'quote" };
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(refs)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("missing object", 1),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "git fetch origin 'topic;$(echo unsafe) space'\\''quote' 'pull/42/head'",
+    );
+  });
+
+  test("surfaces gh PR-view errors before falling back", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": fail("PR not found", 1),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName: PR not found",
+    );
+  });
+
+  test("rejects invalid PR-view JSON, missing fields, and non-hex object IDs", async () => {
+    const runFor = (response: string): Run => mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(response),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, runFor("not json"))).rejects.toThrow("invalid JSON response");
+    await expect(getDiff({ kind: "pr", pr: 42 }, runFor(JSON.stringify({ baseRefOid: 1 })))).rejects.toThrow(
+      "missing base or head commit information",
+    );
+    await expect(getDiff({ kind: "pr", pr: 42 }, runFor(JSON.stringify({ ...PR_REFS, baseRefOid: "not-hex" })))).rejects.toThrow(
+      "invalid baseRefOid",
+    );
+  });
+
+  test("reports unavailable shared history with a deepening hint", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git -c core.quotePath=false merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("no merge base", 1),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "PR #42 history is not available locally; run: git fetch --deepen=<n> or git fetch --unshallow",
     );
   });
 
