@@ -30,7 +30,7 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       const diffResult = await run(diffCommand);
       if (diffResult.code !== 0) {
         if (isPrDiffTooLarge(diffResult.stderr)) {
-          return getLocalPrDiff(target.pr, run);
+          return getLocalPrDiff(target.pr, diffResult.stderr, run);
         }
         throw captureError(diffCommand, diffResult.stderr, diffResult.code);
       }
@@ -77,21 +77,21 @@ interface PrRefs {
   baseRefName: string;
 }
 
-// GitHub declines PR patches spanning more than 300 files. Only that explicit
-// limit triggers a local fallback: authentication, network, and lookup errors
-// retain the normal `gh pr diff` failure path.
+// GitHub declines PR patches that exceed its diff size limits (files or lines).
+// Only an explicit size-limit message triggers a local fallback: authentication,
+// network, and other HTTP failures retain the normal `gh pr diff` failure path.
 function isPrDiffTooLarge(stderr: string): boolean {
   const detail = stderr.toLowerCase();
-  return detail.includes("http 406") || detail.includes("maximum number of files") || detail.includes("too_large");
+  return detail.includes("maximum number of files") || detail.includes("maximum number of lines") || detail.includes("too_large");
 }
 
-async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
+async function getLocalPrDiff(pr: number, ghError: string, run: Run): Promise<ReviewDiff> {
   const refs = await getPrRefs(pr, run);
   for (const sha of [refs.baseRefOid, refs.headRefOid]) {
     const object = await run(["git", "cat-file", "-e", `${sha}^{commit}`]);
     if (object.code !== 0) {
       throw new WuxReviewError(
-        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`,
+        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)} # (use the remote that hosts the PR's base repository if it is not origin)`,
       );
     }
   }
@@ -101,8 +101,9 @@ async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   // keeps GitHub's base...head meaning.
   await requireMergeBase(pr, refs, run);
   const range = `${refs.baseRefOid}...${refs.headRefOid}`;
+  const reason = ghError.trim().split("\n")[0] || "gh pr diff failed";
   process.stderr.write(
-    `wux-review: PR #${pr} exceeds GitHub's diff file limit; reviewing ${range} from local git\n`,
+    `wux-review: PR #${pr} exceeds GitHub's diff size limit (${reason}); reviewing ${range} from local git\n`,
   );
   return finalize(await gitDiff(run, [range]), await gitNames(run, [range]));
 }

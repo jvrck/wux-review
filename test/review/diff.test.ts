@@ -63,6 +63,7 @@ describe("getDiff", () => {
     });
     const { result, stderr } = await captureStderr(() => getDiff({ kind: "pr", pr: 42 }, run));
     expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts", "sub/y.ts"] });
+    expect(stderr).toContain("HTTP 406: the diff exceeded the maximum number of files");
     expect(stderr).toContain(`reviewing ${range} from local git`);
     const rangeRun = mockRun({
       [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
@@ -76,6 +77,27 @@ describe("getDiff", () => {
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow("gh pr diff 42: authentication failed");
   });
 
+  test("an unrelated HTTP 406 remains the original gh error", async () => {
+    const run = mockRun({ "gh pr diff 42": fail("HTTP 406: unsupported media type", 1) });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "gh pr diff 42: HTTP 406: unsupported media type",
+    );
+  });
+
+  test("a line-limit error takes the local fallback", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    const run = mockRun({
+      "gh pr diff 42": fail("the diff exceeded the maximum number of lines", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git -c core.quotePath=false merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok("base\n"),
+      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+      [`git -c core.quotePath=false diff -z --name-only ${range}`]: z("x.ts"),
+    });
+    expect((await getDiff({ kind: "pr", pr: 42 }, run)).files).toEqual(["x.ts"]);
+  });
+
   test("a too-large PR with an unavailable local commit gives the exact fetch hint", async () => {
     const run = mockRun({
       "gh pr diff 42": fail("too_large", 1),
@@ -83,7 +105,7 @@ describe("getDiff", () => {
       "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("missing object", 1),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "PR #42 is too large for gh pr diff and 0123456789abcdef0123456789abcdef01234567 isn't available locally; run: git fetch origin 'main' 'pull/42/head'",
+      "PR #42 is too large for gh pr diff and 0123456789abcdef0123456789abcdef01234567 isn't available locally; run: git fetch origin 'main' 'pull/42/head' # (use the remote that hosts the PR's base repository if it is not origin)",
     );
   });
 
@@ -95,7 +117,7 @@ describe("getDiff", () => {
       "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": fail("missing object", 1),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "PR #42 is too large for gh pr diff and 89abcdef0123456789abcdef0123456789abcdef isn't available locally; run: git fetch origin 'main' 'pull/42/head'",
+      "PR #42 is too large for gh pr diff and 89abcdef0123456789abcdef0123456789abcdef isn't available locally; run: git fetch origin 'main' 'pull/42/head' # (use the remote that hosts the PR's base repository if it is not origin)",
     );
   });
 
@@ -132,6 +154,12 @@ describe("getDiff", () => {
     );
     await expect(getDiff({ kind: "pr", pr: 42 }, runFor(JSON.stringify({ ...PR_REFS, baseRefOid: "not-hex" })))).rejects.toThrow(
       "invalid baseRefOid",
+    );
+    await expect(getDiff({ kind: "pr", pr: 42 }, runFor(JSON.stringify({ ...PR_REFS, headRefOid: "not-hex" })))).rejects.toThrow(
+      "invalid headRefOid",
+    );
+    await expect(getDiff({ kind: "pr", pr: 42 }, runFor(JSON.stringify({ baseRefOid: PR_REFS.baseRefOid, headRefOid: PR_REFS.headRefOid })))).rejects.toThrow(
+      "missing base or head commit information",
     );
   });
 
