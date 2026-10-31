@@ -143,9 +143,9 @@ test("--help prints usage covering every documented flag and exits 0", async () 
   for (const lens of DEFAULT_LENSES) {
     expect(stdout).toContain(lens.name);
   }
-  for (const configKey of [".wux-review.yml", "lenses", "extra_lenses", "check", "reviewers"]) {
-    expect(stdout).toContain(configKey);
-  }
+  expect(stdout).toContain(
+    "  .wux-review.yml     Optional repo-root configuration: lenses, extra_lenses, check, reviewers.",
+  );
   expect(stdout).toContain('"default" expands to that set');
 });
 

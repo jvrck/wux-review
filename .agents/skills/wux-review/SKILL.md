@@ -8,7 +8,8 @@ Run a **dual review** of the change under review with `wux-review` and drive the
 
 Repositories can configure lens selection, extra lenses, deterministic checks,
 and reviewer model pins in `.wux-review.yml` at the repository root. See
-`docs/commands.md#configuration-wux-reviewyml` for the full format.
+[the configuration reference](https://github.com/jvrck/wux-review/blob/main/docs/commands.md#configuration-wux-reviewyml)
+for the full format.
 
 ## 1. Resolve the target
 - A pull request: `--pr <n>`.

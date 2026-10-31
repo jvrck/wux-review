@@ -16,7 +16,12 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 - **Discoverable lens configuration.** `--help`, command documentation, MCP
   documentation, and the bundled skill now name the default lenses and explain
   `.wux-review.yml`. Use `default` in a lens list to include the built-in set
-  before adding repository-specific lenses.
+  before adding repository-specific lenses. The `default` lens name is reserved,
+  so an `extra_lenses` entry with that name is rejected.
+
+- **Structured issue authoring.** New Task, Bug, and Feature templates disable
+  blank issues and pre-fill the required issue format. Contribution guidance now
+  describes the title, section, scope, and private security-reporting rules.
 
 ## 2026.10.26
 

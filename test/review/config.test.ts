@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { configSchema, parseConfig } from "../../src/review/config";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { configSchema, parseConfig } from "../../src/review/config";
 
-const root = new URL("../..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("../..", import.meta.url));
 
 describe("parseConfig", () => {
   test("an empty document is the empty config", () => {
@@ -90,8 +91,9 @@ reviewers:
 
   test("documents every top-level config key", () => {
     const docs = readFileSync(`${root}/docs/commands.md`, "utf8");
-    const section = docs.slice(docs.indexOf("## Configuration (.wux-review.yml)"));
-    expect(section).not.toBe("");
+    const headingIndex = docs.indexOf("## Configuration (.wux-review.yml)");
+    expect(headingIndex).toBeGreaterThanOrEqual(0);
+    const section = docs.slice(headingIndex);
     for (const key of Object.keys(configSchema.shape)) {
       expect(section).toContain(`\`${key}\``);
     }
