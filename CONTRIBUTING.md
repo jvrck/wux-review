@@ -34,7 +34,14 @@ See [docs/running.md](docs/running.md) for runtime requirements and
 ## Bugs and security issues
 
 Open a [GitHub issue](https://github.com/jvrck/wux-review/issues) for bugs or
-feature requests. Issues follow the [Issue Authoring Guide](https://github.com/jvrck-labs/fspec/blob/main/docs/ISSUE_AUTHORING_GUIDE.md): use the issue-chooser templates, a `type:` title, and one unit of work per issue. For vulnerabilities, follow [SECURITY.md](SECURITY.md) and report privately rather than opening a public issue.
+feature requests. Use the issue-chooser templates and one unit of work per
+issue. Give the issue a type-prefixed title:
+`feat|fix|docs|chore|test|ci: <action-oriented title>`. The templates pre-fill
+these nine sections in order: `## Summary`, `## Goal`, `## Current State`,
+`## Implementation Details`, `## Files Likely Affected`, `## Dependencies`,
+`## Constraints/Non-Goals`, `## Acceptance Criteria`, and `## Verification`.
+For vulnerabilities, follow [SECURITY.md](SECURITY.md) and report privately
+rather than opening a public issue.
 
 ## License
 

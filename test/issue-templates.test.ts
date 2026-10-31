@@ -3,7 +3,6 @@ import { readdirSync, readFileSync } from "node:fs";
 
 const root = new URL("..", import.meta.url).pathname;
 const templateDir = `${root}/.github/ISSUE_TEMPLATE`;
-const guideUrl = "https://github.com/jvrck-labs/fspec/blob/main/docs/ISSUE_AUTHORING_GUIDE.md";
 const headings = [
   "## Summary",
   "## Goal",
@@ -34,7 +33,6 @@ describe("issue templates", () => {
       contact_links: Array<{ url: string }>;
     };
     expect(config.blank_issues_enabled).toBe(false);
-    expect(config.contact_links.map((link) => link.url)).toContain(guideUrl);
     expect(config.contact_links.some((link) => /security/.test(link.url))).toBe(true);
   });
 
@@ -49,8 +47,9 @@ describe("issue templates", () => {
       expect(markdown).toContain("| File | Change |");
       expect(markdown).toContain("- [ ]");
       expect(markdown).toContain("```bash");
-      expect(markdown).toContain(guideUrl);
-      expect(markdown).not.toMatch(/\]\(\.?\/?docs\/ISSUE_AUTHORING_GUIDE\.md|Projects v2/);
+      expect(markdown).toContain("CONTRIBUTING.md");
+      expect(markdown).not.toContain("ISSUE_AUTHORING_GUIDE");
+      expect(markdown).not.toContain("Projects v2");
     }
   });
 
@@ -58,7 +57,11 @@ describe("issue templates", () => {
     expect(frontMatter(read("bug.md")).labels).toBe("bug");
     expect(frontMatter(read("feature.md")).labels).toBe("enhancement");
     const contributing = readFileSync(`${root}/CONTRIBUTING.md`, "utf8");
-    expect(contributing).toContain(guideUrl);
+    expect(contributing).toContain("feat|fix|docs|chore|test|ci: <action-oriented title>");
+    expect(contributing).toContain("one unit of work per");
+    expect(contributing).toContain("these nine sections in order");
+    for (const heading of headings) expect(contributing).toContain(heading);
     expect(contributing).toContain("SECURITY.md");
+    expect(contributing).not.toContain("ISSUE_AUTHORING_GUIDE");
   });
 });
