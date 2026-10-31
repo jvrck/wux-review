@@ -1,11 +1,11 @@
+import { Buffer } from "node:buffer";
 import { run as defaultRun, type Run } from "../runtime/exec";
 import { WuxReviewError } from "../runtime/errors";
 import type { ConsolidatedFinding, VerdictEnvelope } from "./consolidate";
 import type { ReviewerName, Severity } from "./types";
 
-// One comment per reviewer, each keyed by its own hidden marker so a re-review
-// updates that reviewer's comment in place — exactly one Claude and one Codex
-// comment per PR, never a duplicate pile.
+// One comment per reviewer for every round. The marker stays first for tooling;
+// the round marker preserves a visible red-to-green history on the PR.
 const REVIEWERS: ReviewerName[] = ["claude", "codex"];
 const markerFor = (reviewer: ReviewerName): string => `<!-- dual-review:${reviewer} -->`;
 // The pre-#62 single-comment marker. Swept on post so upgrading from the old
@@ -15,16 +15,15 @@ const LEGACY_MARKER = "<!-- wux-review -->";
 // The positive per-leg result of a post: which reviewer, the comment URL it
 // landed at (from `.html_url`), and the round it carried (#100). The CLI prints
 // these as a "verdict posted (round N)" signal so a driving session gets a clear
-// completion signal without polling the PR — the upsert edits comments in place,
-// so the PR's comment count never changes to signal a new verdict.
+// completion signal without polling the PR — every result has a fresh URL.
 export interface PostResult {
   reviewer: ReviewerName;
   url: string;
   round: number;
 }
 
-// Post per-agent findings as one comment per reviewer, updating each in place if
-// it already exists. Additive: never changes the verdict and never edits code.
+// Post per-agent findings as new comments every round. Additive: never changes
+// the verdict and never edits code.
 // `run` is injected so the gh boundary is mockable; `now` supplies the header's
 // "updated" timestamp (injected so tests are deterministic). Returns each leg's
 // comment URL + round (#100).
@@ -41,25 +40,37 @@ export async function postToPr(
   if (repo === "") {
     throw new WuxReviewError("--post-to-pr: could not resolve the repository (is this a gh-tracked checkout?)");
   }
-  // Scope updates to OUR OWN marker comments: matching a marker alone would let a
-  // comment authored by anyone else (who happened to prefix it) be overwritten.
+  // Scope reads and pointer edits to OUR OWN marker comments: matching a marker
+  // alone would let another author influence our history.
   // GitHub usernames are `[A-Za-z0-9-]`, so embedding the viewer login is safe.
   const viewer = (await capture(run, ["gh", "api", "user", "--jq", ".login"])).trim();
 
-  // Remove any legacy consolidated comment first, so an upgrade ends with exactly
-  // one Claude and one Codex comment — no orphaned old comment alongside them.
+  // Keep the legacy sweep for the obsolete consolidated marker.
   await removeLegacyComments(run, repo, viewer, pr);
 
-  // One "updated" stamp for both legs of this post (they land together), and the
-  // round from the envelope (absent → round 1, e.g. a one-shot --post-to-pr).
+  const previous = await reviewerComments(run, repo, viewer, pr);
+  const previousRound = priorRound(previous);
+  // A session-derived round is a lower bound; PR history makes one-shot rounds
+  // count up as well.
+  const round = Math.max(envelope.round ?? 1, previousRound + 1);
+  const postedEnvelope = { ...envelope, round };
   const updatedAt = now();
-  const round = envelope.round ?? 1;
   const results: PostResult[] = [];
   for (const reviewer of REVIEWERS) {
     const marker = markerFor(reviewer);
-    const body = `${marker}\n\n${renderAgentComment(envelope, reviewer, updatedAt)}`;
-    const url = await upsertComment(run, repo, viewer, pr, marker, body);
+    const body = `${marker}\n<!-- dual-review:round=${round} -->\n\n${renderAgentComment(postedEnvelope, reviewer, updatedAt)}`;
+    const url = await postComment(run, repo, pr, body);
     results.push({ reviewer, url, round });
+  }
+  for (const comment of supersededComments(previous, previousRound)) {
+    const replacement = results.find((result) => result.reviewer === comment.reviewer);
+    if (replacement === undefined || hasSupersededPointer(comment.body)) continue;
+    try {
+      await capture(run, ["gh", "api", "-X", "PATCH", `repos/${repo}/issues/comments/${comment.id}`, "-f", `body=${withSupersededPointer(comment.body, round, replacement.url)}`]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`wux-review: warning: could not mark prior ${comment.reviewer} comment superseded: ${message}\n`);
+    }
   }
   return results;
 }
@@ -86,46 +97,82 @@ async function removeLegacyComments(run: Run, repo: string, viewer: string, pr: 
   }
 }
 
-// Find this viewer's existing comment for the marker and PATCH it, else POST a
-// new one. Streams matching ids across all pages and picks the last locally
-// (some gh versions reject `--slurp` with `--jq`, so keep pagination compatible).
-// Returns the resulting comment's `.html_url` (#100), so the caller can surface it.
-async function upsertComment(
+interface ReviewerComment {
+  id: string;
+  body: string;
+  reviewer: ReviewerName;
+}
+
+async function reviewerComments(run: Run, repo: string, viewer: string, pr: number): Promise<ReviewerComment[]> {
+  const encoded = await capture(run, [
+    "gh", "api", `repos/${repo}/issues/${pr}/comments`, "--paginate", "--jq",
+    `.[] | select((.body | startswith("<!-- dual-review:")) and .user.login == "${viewer}") | [.id, .body] | @base64`,
+  ]);
+  return encoded.trim().split(/\s+/).filter(Boolean).flatMap((line) => {
+    try {
+      const [id, body] = JSON.parse(Buffer.from(line, "base64").toString("utf8")) as [unknown, unknown];
+      const marker = typeof body === "string" ? body.match(/^<!-- dual-review:(claude|codex) -->/) : undefined;
+      if ((typeof id !== "number" && typeof id !== "string") || typeof body !== "string" || marker === null || marker === undefined) return [];
+      return [{ id: String(id), body, reviewer: marker[1] as ReviewerName }];
+    } catch {
+      throw new WuxReviewError("--post-to-pr: could not parse existing reviewer comments");
+    }
+  });
+}
+
+function commentRound(comment: ReviewerComment): number | undefined {
+  const machine = comment.body.match(/^<!-- dual-review:round=(\d+) -->$/m);
+  if (machine !== null) return Number(machine[1]);
+  // Legacy comments lack a machine round marker. Read only their visible
+  // dual-review header, never a finding or an already-inserted pointer.
+  const visible = comment.body.match(/^\*\*Dual-review \((?:claude|codex)\) — round (\d+) ·/m);
+  return visible === null ? undefined : Number(visible[1]);
+}
+
+function priorRound(comments: ReviewerComment[]): number {
+  const known = comments.map(commentRound).filter((round): round is number => round !== undefined);
+  // Pre-round-key comments may have no usable header: then treat each historic
+  // comment as one prior round. Once any recorded/header round exists, it is the
+  // authoritative monotonic sequence rather than the two-comments-per-round count.
+  return known.length === 0 ? Math.ceil(comments.length / REVIEWERS.length) : Math.max(...known);
+}
+
+// Only the immediately previous pair changes, and only once. Earlier rounds
+// already point at the round that superseded them.
+function supersededComments(comments: ReviewerComment[], previousRound: number): ReviewerComment[] {
+  const known = comments.some((comment) => commentRound(comment) !== undefined);
+  return comments.filter((comment) => known ? commentRound(comment) === previousRound : true);
+}
+
+function hasSupersededPointer(body: string): boolean {
+  return body.split("\n", 3)[1]?.startsWith("> Superseded by round ") === true;
+}
+
+function withSupersededPointer(body: string, round: number, url: string): string {
+  const newline = body.indexOf("\n");
+  const pointer = `> Superseded by round ${round}: ${url}`;
+  // Preserve the marker as byte zero for startswith-based tooling. Other than
+  // this inserted line, the prior comment body remains byte-for-byte unchanged.
+  return newline === -1 ? `${body}\n${pointer}` : `${body.slice(0, newline + 1)}${pointer}\n${body.slice(newline + 1)}`;
+}
+
+// Always create a new comment. PATCH is reserved for the optional one-line
+// superseded pointer applied after both new comments have safely landed.
+async function postComment(
   run: Run,
   repo: string,
-  viewer: string,
   pr: number,
-  marker: string,
   body: string,
 ): Promise<string> {
-  const existing = (
-    await capture(run, [
-      "gh",
-      "api",
-      `repos/${repo}/issues/${pr}/comments`,
-      "--paginate",
-      "--jq",
-      `.[] | select((.body | startswith("${marker}")) and .user.login == "${viewer}") | .id`,
-    ])
-  )
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .at(-1);
-
-  const write = existing
-    ? ["gh", "api", "-X", "PATCH", `repos/${repo}/issues/comments/${existing}`, "-f", `body=${body}`, "--jq", ".html_url"]
-    : ["gh", "api", "-X", "POST", `repos/${repo}/issues/${pr}/comments`, "-f", `body=${body}`, "--jq", ".html_url"];
-  return (await capture(run, write)).trim();
+  return (await capture(run, ["gh", "api", "-X", "POST", `repos/${repo}/issues/${pr}/comments`, "-f", `body=${body}`, "--jq", ".html_url"])).trim();
 }
 
 // Render one reviewer's section of the verdict: that reviewer's own verdict and
 // the findings it raised, each bucketed by the severity THAT reviewer assigned —
 // not the consolidated max — so a reviewer is never shown an escalated severity
 // in its own comment. A finding both raised shows `raised by claude, codex`, so
-// cross-agreement stays visible in each comment. `updatedAt` (an ISO timestamp)
-// and the envelope's round drive the visible header line (#100) that makes an
-// in-place re-review edit detectable without diffing bodies.
+// cross-agreement stays visible in each comment. `updatedAt` and the envelope's
+// round drive the visible header line; historical comments stay intact.
 export function renderAgentComment(envelope: VerdictEnvelope, reviewer: ReviewerName, updatedAt: string): string {
   // Walk the consolidated buckets and re-file each of this reviewer's findings
   // under its OWN severity (perReviewer), falling back to the consolidated bucket
@@ -148,12 +195,11 @@ export function renderAgentComment(envelope: VerdictEnvelope, reviewer: Reviewer
   }
 
   const lines: string[] = [];
-  // Visible header (#100): round number, updated-at, and this leg's verdict. Since
-  // the comment is upserted in place (the count never changes), this is how a
-  // human or orchestrator detects a fresh re-review verdict — by the round marker /
-  // updated timestamp, never by a new comment appearing.
+  // Visible header: round number, reviewed PR head (when applicable), timestamp,
+  // and this leg's verdict.
   const headerVerdict = envelope.reviewers[reviewer] === "block" ? "must-fix" : "clean";
-  lines.push(`**Dual-review (${reviewer}) — round ${envelope.round ?? 1} · updated ${updatedAt} · verdict: ${headerVerdict}**`);
+  const head = envelope.head === undefined ? "" : ` · head ${envelope.head.slice(0, 12)}`;
+  lines.push(`**Dual-review (${reviewer}) — round ${envelope.round ?? 1}${head} · updated ${updatedAt} · verdict: ${headerVerdict}**`);
   lines.push("");
   lines.push(`## wux-review · ${reviewer}: ${envelope.reviewers[reviewer] === "block" ? "🔴 block" : "🟢 approve"}`);
 

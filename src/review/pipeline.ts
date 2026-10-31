@@ -41,6 +41,7 @@ class SessionStateConflictError extends WuxReviewError {}
 export interface ReviewInput {
   ref?: string;
   pr?: number;
+  expectHead?: string;
   lenses?: string[];
   session?: string;
   cwd?: string;
@@ -70,15 +71,24 @@ export interface ReviewDeps {
 }
 
 export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Promise<VerdictEnvelope> {
+  const expectHead = input.expectHead?.toLowerCase();
   if (input.ref !== undefined && input.pr !== undefined) {
     throw new WuxReviewError("provide either a ref or pr, not both");
+  }
+  if (expectHead !== undefined && input.pr === undefined) {
+    throw new WuxReviewError("expect_head requires pr");
   }
   throwIfObservableReviewAborted(input);
 
   const loadConfig = deps.loadConfig ?? defaultLoadConfig;
   const config = await loadConfig();
   const lenses = resolveLenses({ cliLenses: input.lenses, config });
-  const target = resolveTarget({ ref: input.ref, pr: input.pr });
+  const target = resolveTarget({
+    ref: input.ref,
+    pr: input.pr,
+    expectHead,
+    headWaitMs: config.prHeadWaitSeconds === undefined ? undefined : config.prHeadWaitSeconds * 1000,
+  });
   const getDiff = deps.getDiff ?? defaultGetDiff;
   // The diff is the FULL cumulative base...head change for the target, computed
   // identically regardless of session state (#94): a `--session` re-review is fed
@@ -86,7 +96,8 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   // round — so it can never false-flag earlier-commit content (e.g. tests) as
   // missing. Prior findings (loaded below) ride along the prompt as context only;
   // they do not scope this diff.
-  const { diff } = await getDiff(target);
+  const reviewDiff = await getDiff(target);
+  const { diff } = reviewDiff;
   throwIfObservableReviewAborted(input);
 
   // An explicit session id (CLI `--session`, MCP `session`) means session mode:
@@ -289,7 +300,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
       evidence,
     };
     if (!observable) {
-      return await finalizeReviewRound(finalization, store);
+      return withHead(await finalizeReviewRound(finalization, store), reviewDiff.head);
     }
     if (recoveryRecord === undefined) {
       throw new WuxReviewError(
@@ -297,6 +308,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
       );
     }
     const prepared = prepareReviewRoundFinalization(finalization);
+    prepared.envelope = withHead(prepared.envelope, reviewDiff.head);
     try {
       await commitObservableFinalization({
         record: recoveryRecord,
@@ -360,6 +372,10 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   } finally {
     await releaseObservableLock?.();
   }
+}
+
+function withHead(envelope: VerdictEnvelope, head: string | undefined): VerdictEnvelope {
+  return head === undefined ? envelope : { ...envelope, head };
 }
 
 function throwIfObservableReviewAborted(

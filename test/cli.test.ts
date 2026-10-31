@@ -353,6 +353,7 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       const { code, stdout, stderr } = await callCli(["HEAD~1", "--json", "--post-to-pr", "42"], dir, {
         runReviewers: fakeReviewers([], [finding({ file: "a.txt" })]), // a must-fix -> block
         postToPr: async (pr, env) => {
+          env.head = "0123456789abcdef0123456789abcdef01234567";
           posted = { pr, verdict: env.verdict };
           return [
             { reviewer: "claude", url: "https://github.com/o/r/pull/42#c1", round: env.round ?? 1 },
@@ -365,7 +366,7 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       expect(posted).toEqual({ pr: 42, verdict: "block" });
       // The posted-verdict signal (round + both comment URLs) lands on stderr so it
       // never corrupts the --json verdict on stdout (#100).
-      expect(stderr).toContain("verdict posted (round 1)");
+      expect(stderr).toContain("verdict posted (round 1, head 0123456789ab)");
       expect(stderr).toContain("claude https://github.com/o/r/pull/42#c1");
       expect(stderr).toContain("codex https://github.com/o/r/pull/42#c2");
     } finally {
@@ -678,6 +679,13 @@ describe("parseReviewArgs", () => {
     for (const bad of ["0", "-1", "abc", "0x10", "1e3", "+5", "3.5", " 5 "]) {
       expect(() => parseReviewArgs(["--pr", bad])).toThrow();
     }
+  });
+
+  test("--expect-head is PR-only", () => {
+    const sha = "a".repeat(40);
+    expect(parseReviewArgs(["--pr", "7", "--expect-head", sha.toUpperCase()]).expectHead).toBe(sha);
+    expect(() => parseReviewArgs(["--expect-head", sha])).toThrow("requires --pr");
+    expect(() => parseReviewArgs(["--pr", "7", "--expect-head", "abc"])).toThrow("full 40-hex SHA");
   });
 
   test("treats -- as end of options (ref may then start with -)", () => {

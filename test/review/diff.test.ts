@@ -21,14 +21,136 @@ function mockRun(table: Record<string, RunResult>): Run {
 const SAMPLE_DIFF = "diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n";
 
 describe("getDiff", () => {
-  test("pr target shells out to gh pr diff", async () => {
+  test("pr target waits for its expected head and records the reviewed SHA", async () => {
     const run = mockRun({
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("abc123\n"),
       "gh pr diff 42": ok(SAMPLE_DIFF),
       "gh pr diff 42 --name-only": ok("x.ts\n"),
     });
-    const { diff, files } = await getDiff({ kind: "pr", pr: 42 }, run);
+    const { diff, files, head } = await getDiff({ kind: "pr", pr: 42, expectHead: "abc123" }, run);
     expect(diff).toBe(SAMPLE_DIFF);
     expect(files).toEqual(["x.ts"]);
+    expect(head).toBe("abc123");
+  });
+
+  test("compares expected heads case-insensitively", async () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    const run = mockRun({
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok(`${sha}\n`),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42, expectHead: sha.toUpperCase() }, run)).resolves.toMatchObject({ head: sha });
+  });
+
+  test("polls until GitHub exposes the expected pushed head", async () => {
+    const heads = ["old", "expected", "expected"];
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid --jq .headRefOid") return ok(`${heads.shift()}\n`);
+      if (key === "gh pr diff 42") return ok(SAMPLE_DIFF);
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+    const pauses: number[] = [];
+    await expect(getDiff({ kind: "pr", pr: 42, expectHead: "expected" }, run, async (ms) => { pauses.push(ms); })).resolves.toMatchObject({ head: "expected" });
+    expect(pauses).toEqual([1_000]);
+  });
+
+  test("fails loudly without fetching a diff when the expected head never appears", async () => {
+    const run: Run = async (cmd) => {
+      if (cmd.join(" ") === "gh pr view 42 --json headRefOid --jq .headRefOid") return ok("old\n");
+      throw new Error(`must not fetch: ${cmd.join(" ")}`);
+    };
+    await expect(getDiff({ kind: "pr", pr: 42, expectHead: "expected", headWaitMs: 0 }, run)).rejects.toThrow(
+      "PR #42 head is old, expected expected; push may not have landed",
+    );
+  });
+
+  test("defaults the expectation to local HEAD when checked out on the PR branch", async () => {
+    const run = mockRun({
+      "gh pr view 42 --json headRefName,headRepository": ok('{"headRefName":"feature","headRepository":{"nameWithOwner":"owner/repo"}}\n'),
+      "git branch --show-current": ok("feature\n"),
+      "git config --get branch.feature.remote": ok("origin\n"),
+      "git remote get-url origin": ok("git@example.invalid:owner/repo.git\n"),
+      "git rev-parse HEAD": ok("abc123\n"),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("abc123\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "abc123" });
+  });
+
+  test("does not infer a fork PR expectation from a same-named local branch", async () => {
+    const run = mockRun({
+      "gh pr view 42 --json headRefName,headRepository": ok('{"headRefName":"patch","headRepository":{"nameWithOwner":"fork/repo"}}\n'),
+      "git branch --show-current": ok("patch\n"),
+      "git config --get branch.patch.remote": ok("origin\n"),
+      "git remote get-url origin": ok("git@example.invalid:upstream/repo.git\n"),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("forkhead\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "forkhead" });
+  });
+
+  test("falls back to an unpinned PR review outside a Git checkout", async () => {
+    const run = mockRun({
+      "gh pr view 42 --json headRefName,headRepository": ok('{"headRefName":"feature","headRepository":{"nameWithOwner":"owner/repo"}}\n'),
+      "git branch --show-current": fail("not a git repository", 128),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("head\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "head" });
+  });
+
+  test("falls back to an unpinned review when GitHub local-head metadata fails", async () => {
+    const run = mockRun({
+      "gh pr view 42 --json headRefName,headRepository": ok("not json\n"),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("head\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "head" });
+  });
+
+  test("falls back to an unpinned review when GitHub local-head lookup exits non-zero", async () => {
+    const run = mockRun({
+      "gh pr view 42 --json headRefName,headRepository": fail("temporary API failure", 1),
+      "gh pr view 42 --json headRefOid --jq .headRefOid": ok("head\n"),
+      "gh pr diff 42": ok(SAMPLE_DIFF),
+      "gh pr diff 42 --name-only": ok("x.ts\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "head" });
+  });
+
+  test("refetches once if an unpinned PR head moves during the two diff calls", async () => {
+    const heads = ["one", "two", "two"];
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefName,headRepository") return ok('{"headRefName":"other","headRepository":{"nameWithOwner":"owner/repo"}}\n');
+      if (key === "git branch --show-current") return ok("feature\n");
+      if (key === "gh pr view 42 --json headRefOid --jq .headRefOid") return ok(`${heads.shift()}\n`);
+      if (key === "gh pr diff 42") return ok(SAMPLE_DIFF);
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toMatchObject({ head: "two" });
+  });
+
+  test("rejects an explicitly pinned head that moves during diff fetch", async () => {
+    const heads = ["expected", "new-head"];
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid --jq .headRefOid") return ok(`${heads.shift()}\n`);
+      if (key === "gh pr diff 42") return ok(SAMPLE_DIFF);
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+    await expect(getDiff({ kind: "pr", pr: 42, expectHead: "expected" }, run)).rejects.toThrow(
+      "PR #42 head is new-head, expected expected; push may not have landed",
+    );
   });
 
   test("range target uses git diff with stable path encoding (-z, quotePath off)", async () => {

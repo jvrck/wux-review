@@ -5,7 +5,13 @@ import type { Target } from "./target";
 export interface ReviewDiff {
   diff: string;
   files: string[];
+  head?: string;
 }
+
+const DEFAULT_HEAD_WAIT_MS = 60_000;
+const HEAD_POLL_MS = 1_000;
+type Sleep = (ms: number) => Promise<void>;
+const sleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Fetch the unified diff + changed-file list for a resolved target. `run` is
 // injectable so the git/gh boundary can be mocked in tests.
@@ -19,16 +25,33 @@ export interface ReviewDiff {
 // can never lose content from an earlier commit (#94). The prior-round findings a
 // re-review threads into the prompt are context only (see prompt.ts / pipeline.ts);
 // they do not narrow this diff.
-export async function getDiff(target: Target, run: Run = defaultRun): Promise<ReviewDiff> {
+export async function getDiff(target: Target, run: Run = defaultRun, pause: Sleep = sleep): Promise<ReviewDiff> {
   switch (target.kind) {
     case "pr": {
       // `gh pr diff <n>` is the full base...head diff for the PR — the complete
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const diff = await capture(run, ["gh", "pr", "diff", String(target.pr)]);
-      const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
-      return finalize(diff, splitLines(names));
+      const expected = target.expectHead?.toLowerCase() ?? await localExpectedHead(target.pr, run);
+      const firstHead = await waitForHead(target.pr, expected, target.headWaitMs ?? DEFAULT_HEAD_WAIT_MS, run, pause);
+      let fetched = await fetchPrDiff(target.pr, run);
+      let finalHead = await prHead(target.pr, run);
+      if (finalHead !== firstHead) {
+        // A no-expectation review may follow one concurrent PR update. An explicit
+        // expectation is stricter: a later push is not the caller's requested diff.
+        if (expected !== undefined && finalHead !== expected) {
+          throw headMismatch(target.pr, finalHead, expected);
+        }
+        // Only an unpinned review reaches this branch; refetch exactly once to
+        // close the diff/name-list race, then reject a second move.
+        const refetchHead = finalHead;
+        fetched = await fetchPrDiff(target.pr, run);
+        finalHead = await prHead(target.pr, run);
+        if (finalHead !== refetchHead) {
+          throw headMismatch(target.pr, finalHead, refetchHead);
+        }
+      }
+      return { ...finalize(fetched.diff, splitLines(fetched.names)), head: finalHead };
     }
     case "range": {
       // A three-dot `base...HEAD` range (target.ts) is the full cumulative diff of
@@ -61,6 +84,67 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       return finalize(diff, files);
     }
   }
+}
+
+async function fetchPrDiff(pr: number, run: Run): Promise<{ diff: string; names: string }> {
+  const diff = await capture(run, ["gh", "pr", "diff", String(pr)]);
+  const names = await capture(run, ["gh", "pr", "diff", String(pr), "--name-only"]);
+  return { diff, names };
+}
+
+async function localExpectedHead(pr: number, run: Run): Promise<string | undefined> {
+  // This is an optional convenience only. Every local-git failure deliberately
+  // falls back to an unpinned PR review, preserving non-checkout use.
+  const details = await tryCapture(run, ["gh", "pr", "view", String(pr), "--json", "headRefName,headRepository"]);
+  if (details === undefined) return undefined;
+  let remote: { headRefName?: unknown; headRepository?: { nameWithOwner?: unknown } | null };
+  try {
+    remote = JSON.parse(details) as { headRefName?: unknown; headRepository?: { nameWithOwner?: unknown } | null };
+  } catch { return undefined; }
+  if (typeof remote.headRefName !== "string" || typeof remote.headRepository?.nameWithOwner !== "string") {
+    return undefined;
+  }
+  const branch = await tryCapture(run, ["git", "branch", "--show-current"]);
+  if (branch?.trim() === "" || branch?.trim() !== remote.headRefName) return undefined;
+  const remoteName = (await tryCapture(run, ["git", "config", "--get", `branch.${branch.trim()}.remote`]))?.trim();
+  if (remoteName === undefined || remoteName === "") return undefined;
+  const remoteUrl = await tryCapture(run, ["git", "remote", "get-url", remoteName]);
+  if (remoteUrl === undefined || repositoryFromRemoteUrl(remoteUrl.trim()) !== remote.headRepository.nameWithOwner.toLowerCase()) {
+    return undefined;
+  }
+  const local = await tryCapture(run, ["git", "rev-parse", "HEAD"]);
+  return local?.trim().toLowerCase() || undefined;
+}
+
+async function tryCapture(run: Run, cmd: string[]): Promise<string | undefined> {
+  const result = await run(cmd);
+  return result.code === 0 ? result.stdout : undefined;
+}
+
+function repositoryFromRemoteUrl(url: string): string | undefined {
+  const matched = url.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/);
+  return matched?.[1]?.toLowerCase();
+}
+
+async function waitForHead(pr: number, expected: string | undefined, timeoutMs: number, run: Run, pause: Sleep): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let actual = await prHead(pr, run);
+  while (expected !== undefined && actual !== expected) {
+    if (Date.now() >= deadline) throw headMismatch(pr, actual, expected);
+    await pause(Math.min(HEAD_POLL_MS, Math.max(0, deadline - Date.now())));
+    actual = await prHead(pr, run);
+  }
+  return actual;
+}
+
+async function prHead(pr: number, run: Run): Promise<string> {
+  const head = (await capture(run, ["gh", "pr", "view", String(pr), "--json", "headRefOid", "--jq", ".headRefOid"])).trim().toLowerCase();
+  if (head === "") throw new WuxReviewError(`PR #${pr}: GitHub returned no head SHA`);
+  return head;
+}
+
+function headMismatch(pr: number, actual: string, expected: string): WuxReviewError {
+  return new WuxReviewError(`PR #${pr} head is ${actual}, expected ${expected}; push may not have landed`);
 }
 
 function finalize(diff: string, files: string[]): ReviewDiff {

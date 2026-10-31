@@ -248,4 +248,20 @@ describe("review_diff MCP server", () => {
       expect(textOf(result)).toContain("not both");
     });
   });
+
+  test("accepts an uppercase full expected-head SHA before pipeline normalization", async () => {
+    await withServer({ loadConfig: async () => ({}) }, async (client) => {
+      const result = await client.callTool({ name: "review_diff", arguments: { ref: "HEAD~1", pr: 7, expect_head: "A".repeat(40) } });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("not both");
+    });
+  });
+
+  test("rejects expect_head unless a PR target is supplied", async () => {
+    await withServer({ loadConfig: async () => ({}) }, async (client) => {
+      const result = await client.callTool({ name: "review_diff", arguments: { expect_head: "a".repeat(40) } });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("expect_head requires pr");
+    });
+  });
 });

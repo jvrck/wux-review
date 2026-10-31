@@ -11,6 +11,13 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **PR review provenance and history.** PR reviews can wait for an expected
+  pushed head and record the reviewed SHA in JSON and posted-comment headers.
+  Each `--post-to-pr` round now adds a fresh Claude/Codex comment pair and links
+  the preceding pair forward, preserving block-to-approve history.
+
 ## 2026.10.26
 
 ### Fixed

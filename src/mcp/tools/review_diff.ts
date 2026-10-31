@@ -18,19 +18,20 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
       description:
         "Run the Claude+Codex dual review of a code change and return the consolidated verdict envelope " +
         "(verdict, must_fix, nice_fix, nits, reviewers, session). Reviews a git ref/range, the working tree " +
-        "(omit ref), or a pull request (pr); optionally posts the findings to a PR. Judges only — it never " +
+        "(omit ref), or a pull request (pr); optionally pins an expected PR head and posts findings to a PR. Judges only — it never " +
         "edits code; the worker owns the fix loop and merge gate.",
       inputSchema: {
         ref: z.string().min(1).optional(),
         pr: z.number().int().positive().optional(),
+        expect_head: z.string().regex(/^[0-9a-f]{40}$/i, "must be a full 40-hex SHA").optional(),
         lenses: z.array(z.string().min(1)).min(1).optional(),
         post_to_pr: z.number().int().positive().optional(),
         session: z.string().min(1).optional(),
       },
     },
-    async ({ ref, pr, lenses, post_to_pr, session }) => {
+    async ({ ref, pr, expect_head, lenses, post_to_pr, session }) => {
       const envelope = await runReview(
-        { ref, pr, lenses, session },
+        { ref, pr, expectHead: expect_head?.toLowerCase(), lenses, session },
         {
           runReviewers: deps.runReviewers,
           loadConfig: deps.loadConfig,

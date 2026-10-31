@@ -26,12 +26,15 @@ change the AI review verdict (which still blocks iff a reviewer raises a must-fi
 check:
   - ruff check
   - pytest -q
+# Optional bounded wait for GitHub to show --expect-head (default: 60 seconds).
+pr_head_wait_seconds: 60
 ```
 
 ## Options
 | Flag | Meaning |
 |------|---------|
 | `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). |
+| `--expect-head <sha>` | For a PR, wait for this pushed full 40-hex SHA before fetching; fail rather than review a stale head. When omitted on the checked-out PR branch with a matching tracked head repository, local `HEAD` is used automatically. |
 | `--lenses <list>` | Comma-separated lens-set override (default: the v1 lens set). |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |
@@ -102,35 +105,33 @@ demoted, never deleted; a genuinely new must-fix, or one with new runnable
 proof, still blocks the verdict.
 
 `--post-to-pr` is additive: it never changes the review verdict or edits code.
-It posts **one comment per reviewer** — Claude and Codex — each keyed by a hidden
-marker (`<!-- dual-review:claude -->` / `<!-- dual-review:codex -->`) so a
-re-review updates that reviewer's comment in place: exactly one Claude and one
-Codex comment per PR, never a duplicate pile. If posting fails, the CLI prints a
-warning and still exits according to the review verdict. The reviewed target and
-the destination PR can differ, so controlled proof runs can post to a dedicated
-PR while reviewing the same PR diff.
+Every round posts **a new comment per reviewer** — Claude and Codex — each keyed
+by its existing hidden marker plus `<!-- dual-review:round=N -->`. The newest pair
+is the current verdict. The preceding pair receives only a one-line
+`Superseded by round N` pointer; its original verdict and findings remain intact.
+If posting or a best-effort pointer update fails, the CLI prints a warning and
+still exits according to the review verdict. The reviewed target and the
+destination PR can differ, so controlled proof runs can post to a dedicated PR
+while reviewing the same PR diff.
 
-**Detecting a fresh verdict (upsert semantics).** Because the comments are
-updated in place, the PR's wux-review comment **count stays 2 across every round** —
-so a new comment never appears to signal a completed re-review. Each comment
-instead opens with a visible header line:
+Each new comment opens with a visible header line:
 
 ```
-**Dual-review (codex) — round 2 · updated 2026-07-24T04:51:24Z · verdict: must-fix**
+**Dual-review (codex) — round 2 · head 0123456789ab · updated 2026-07-24T04:51:24Z · verdict: must-fix**
 ```
 
-Detect a new verdict by the **round number** (or the comment `updatedAt` / the
-header timestamp), never by the comment count. `round` comes from the
-`--session` state (round 1 on the first review of a session or a one-shot;
-incremented each re-review), and the header `verdict` is that leg's own
-`clean`/`must-fix`. The HTML marker keys are unchanged, so marker-grep tooling is
-unaffected.
+Detect a new verdict by the highest **round number** or newest comment pair.
+Rounds advance from PR history even without `--session`; a session-derived round
+never goes backwards. The header `verdict` is that leg's own `clean`/`must-fix`.
+For PR reviews, `head` identifies the reviewed commit and the additive `head`
+field is included in `--json`. The HTML marker keys are unchanged, so marker-grep
+tooling is unaffected.
 
 On completion the CLI prints a positive posted-verdict signal to **stderr** (so it
 never corrupts the machine-readable `--json` verdict on stdout):
 
 ```
-wux-review: verdict posted (round 2) — claude <url> · codex <url>
+wux-review: verdict posted (round 2, head 0123456789ab) — claude <url> · codex <url>
 ```
 
 so a driving session gets a definitive "verdict posted (round N)" with both

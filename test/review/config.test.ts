@@ -32,6 +32,11 @@ reviewers:
     expect(parseConfig("check: pytest -q\n")).toEqual({ check: ["pytest -q"] });
   });
 
+  test("parses a bounded PR expected-head wait", () => {
+    expect(parseConfig("pr_head_wait_seconds: 12\n")).toEqual({ prHeadWaitSeconds: 12 });
+    expect(() => parseConfig("pr_head_wait_seconds: 0\n")).toThrow(".wux-review.yml");
+  });
+
   test("keeps an array check as an ordered command list", () => {
     expect(parseConfig("check:\n  - ruff check\n  - pytest -q\n")).toEqual({ check: ["ruff check", "pytest -q"] });
   });

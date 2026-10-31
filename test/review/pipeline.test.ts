@@ -7,6 +7,7 @@ import type {
 } from "../../src/review/observable-lifecycle";
 import type { Backend } from "../../src/review/reviewers";
 import type { SessionStore } from "../../src/review/session-state";
+import type { Target } from "../../src/review/target";
 import type { SessionState } from "../../src/review/types";
 
 const report = (findings: unknown[]): string => "```json\n" + JSON.stringify({ findings }) + "\n```";
@@ -59,8 +60,43 @@ describe("runReview", () => {
     await expect(runReview({ ref: "HEAD~1", pr: 7 }, { loadConfig: async () => ({}) })).rejects.toThrow("not both");
   });
 
-  // #100: the envelope carries a 1-based round, sourced from and persisted to the
-  // session state, so a re-review's in-place comment edit is detectable.
+  test("rejects an expected head without a PR for every caller", async () => {
+    await expect(runReview({ expectHead: "a".repeat(40) }, { loadConfig: async () => ({}) })).rejects.toThrow("expect_head requires pr");
+  });
+
+  test("stamps the reviewed PR head on direct and observable envelopes", async () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const directClaude = scripted([[]]);
+    const directCodex = scripted([[]]);
+    const directStore = memStore();
+    const directDeps = {
+      ...deps(directClaude.backend, directCodex.backend, directStore.store),
+      getDiff: async (target: Target) => {
+        expect(target.kind === "pr" ? target.expectHead : undefined).toBe(sha);
+        return { diff: "diff --git a/app.ts b/app.ts\n+changed\n", files: ["app.ts"], head: sha };
+      },
+    };
+    await expect(runReview({ pr: 7, expectHead: sha.toUpperCase(), direct: true }, directDeps)).resolves.toMatchObject({ head: sha });
+
+    const observableClaude = scripted([[]]);
+    const observableCodex = scripted([[]]);
+    const observableStore = memStore();
+    const observableDeps = {
+      ...deps(observableClaude.backend, observableCodex.backend, observableStore.store),
+      getDiff: async () => ({ diff: "diff --git a/app.ts b/app.ts\n+changed\n", files: ["app.ts"], head: sha }),
+      acquireObservableLock: async () => async () => {},
+      observableRoundStore: {
+        load: async () => undefined,
+        save: async () => {},
+        clear: async () => {},
+        prune: async () => {},
+      },
+    };
+    await expect(runReview({ pr: 7 }, observableDeps)).resolves.toMatchObject({ head: sha });
+  });
+
+  // #100: the envelope carries a 1-based round, sourced from and persisted to
+  // session state, so PR posting can preserve a monotonic review history.
   test("stamps a 1-based round on the envelope and increments it each --session re-review", async () => {
     const claude = scripted([[], [], []]);
     const codex = scripted([[], [], []]);
