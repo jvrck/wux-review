@@ -19,6 +19,21 @@ function mockRun(table: Record<string, RunResult>): Run {
 }
 
 const SAMPLE_DIFF = "diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n";
+const PR_REFS = { baseRefOid: "base123", headRefOid: "head456", baseRefName: "main" };
+
+async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const writes: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: await fn(), stderr: writes.join("") };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
 
 describe("getDiff", () => {
   test("pr target shells out to gh pr diff", async () => {
@@ -29,6 +44,55 @@ describe("getDiff", () => {
     const { diff, files } = await getDiff({ kind: "pr", pr: 42 }, run);
     expect(diff).toBe(SAMPLE_DIFF);
     expect(files).toEqual(["x.ts"]);
+  });
+
+  test("a too-large PR diff falls back to the matching local three-dot range", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    const run = mockRun({
+      "gh pr diff 42": fail("HTTP 406: the diff exceeded the maximum number of files", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e base123^{commit}": ok(""),
+      "git cat-file -e head456^{commit}": ok(""),
+      "git -c core.quotePath=false merge-base base123 head456": ok("base123\n"),
+      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+      [`git -c core.quotePath=false diff -z --name-only ${range}`]: z("x.ts", "sub/y.ts"),
+    });
+    const { result, stderr } = await captureStderr(() => getDiff({ kind: "pr", pr: 42 }, run));
+    expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts", "sub/y.ts"] });
+    expect(stderr).toContain(`reviewing ${range} from local git`);
+    const rangeRun = mockRun({
+      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+      [`git -c core.quotePath=false diff -z --name-only ${range}`]: z("x.ts", "sub/y.ts"),
+    });
+    expect(await getDiff({ kind: "range", range }, rangeRun)).toEqual(result);
+  });
+
+  test("a non-limit gh PR diff failure remains unchanged", async () => {
+    const run = mockRun({ "gh pr diff 42": fail("authentication failed", 1) });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow("gh pr diff 42: authentication failed");
+  });
+
+  test("a too-large PR with an unavailable local commit gives the exact fetch hint", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e base123^{commit}": fail("missing object", 1),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "PR #42 is too large for gh pr diff and base123 isn't available locally; run: git fetch origin main pull/42/head",
+    );
+  });
+
+  test("a too-large PR with an unavailable local head gives the same fetch hint", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail("maximum number of files", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e base123^{commit}": ok(""),
+      "git cat-file -e head456^{commit}": fail("missing object", 1),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "PR #42 is too large for gh pr diff and head456 isn't available locally; run: git fetch origin main pull/42/head",
+    );
   });
 
   test("range target uses git diff with stable path encoding (-z, quotePath off)", async () => {

@@ -13,6 +13,12 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ### Added
 
+- **Large-PR local fallback.** When GitHub declines a pull-request diff because
+  it exceeds the file limit, wux-review now reviews the equivalent local
+  `base...head` range if both commits are already available. It never fetches
+  automatically and prints the required fetch command when either commit is
+  absent.
+
 - **Discoverable lens configuration.** `--help`, command documentation, MCP
   documentation, and the bundled skill now name the default lenses and explain
   `.wux-review.yml`. Use `default` in a lens list to include the built-in set

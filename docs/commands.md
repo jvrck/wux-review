@@ -63,7 +63,7 @@ reviewers:
 ## Options
 | Flag | Meaning |
 |------|---------|
-| `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). |
+| `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). If GitHub declines a diff over its file limit, wux-review uses the local `base...head` range when both commits are already present; it prints the exact fetch command when they are not. |
 | `--lenses <list>` | Comma-separated lens-set override. The default set is `correctness`, `edge-cases`, `security`, `regression`, `clarity`; `default` expands to that set. |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |

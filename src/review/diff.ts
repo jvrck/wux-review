@@ -26,7 +26,15 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const diff = await capture(run, ["gh", "pr", "diff", String(target.pr)]);
+      const diffCommand = ["gh", "pr", "diff", String(target.pr)];
+      const diffResult = await run(diffCommand);
+      if (diffResult.code !== 0) {
+        if (isPrDiffTooLarge(diffResult.stderr)) {
+          return getLocalPrDiff(target.pr, run);
+        }
+        throw captureError(diffCommand, diffResult.stderr, diffResult.code);
+      }
+      const diff = diffResult.stdout;
       const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
       return finalize(diff, splitLines(names));
     }
@@ -61,6 +69,63 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       return finalize(diff, files);
     }
   }
+}
+
+interface PrRefs {
+  baseRefOid: string;
+  headRefOid: string;
+  baseRefName: string;
+}
+
+// GitHub declines PR patches spanning more than 300 files. Only that explicit
+// limit triggers a local fallback: authentication, network, and lookup errors
+// retain the normal `gh pr diff` failure path.
+function isPrDiffTooLarge(stderr: string): boolean {
+  const detail = stderr.toLowerCase();
+  return detail.includes("http 406") || detail.includes("maximum number of files") || detail.includes("too_large");
+}
+
+async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
+  const refs = await getPrRefs(pr, run);
+  for (const sha of [refs.baseRefOid, refs.headRefOid]) {
+    const object = await run(["git", "cat-file", "-e", `${sha}^{commit}`]);
+    if (object.code !== 0) {
+      throw new WuxReviewError(
+        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${refs.baseRefName} pull/${pr}/head`,
+      );
+    }
+  }
+
+  // Calculate the merge-base explicitly before using the three-dot form. The
+  // range helpers below preserve the same path handling as an ordinary local
+  // range review, while the three-dot range keeps GitHub's base...head meaning.
+  await gitOut(run, ["merge-base", refs.baseRefOid, refs.headRefOid]);
+  const range = `${refs.baseRefOid}...${refs.headRefOid}`;
+  process.stderr.write(
+    `wux-review: PR #${pr} exceeds GitHub's diff file limit; reviewing ${range} from local git\n`,
+  );
+  return finalize(await gitDiff(run, [range]), await gitNames(run, [range]));
+}
+
+async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
+  const command = ["gh", "pr", "view", String(pr), "--json", "baseRefOid,headRefOid,baseRefName"];
+  const text = await capture(run, command);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid JSON response`);
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as Record<string, unknown>).baseRefOid !== "string" ||
+    typeof (parsed as Record<string, unknown>).headRefOid !== "string" ||
+    typeof (parsed as Record<string, unknown>).baseRefName !== "string"
+  ) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing base or head commit information`);
+  }
+  return parsed as PrRefs;
 }
 
 function finalize(diff: string, files: string[]): ReviewDiff {
@@ -100,10 +165,14 @@ async function noIndexDiff(run: Run, file: string): Promise<string> {
 async function capture(run: Run, cmd: string[]): Promise<string> {
   const result = await run(cmd);
   if (result.code !== 0) {
-    const detail = result.stderr.trim() || `exit ${result.code}`;
-    throw new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
+    throw captureError(cmd, result.stderr, result.code);
   }
   return result.stdout;
+}
+
+function captureError(cmd: string[], stderr: string, code: number): WuxReviewError {
+  const detail = stderr.trim() || `exit ${code}`;
+  return new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
 }
 
 function splitNul(out: string): string[] {
