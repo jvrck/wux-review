@@ -9,7 +9,9 @@ import { WuxReviewError } from "../runtime/errors";
 // the reviewer model fields gate model pinning in #6.
 const lensSchema = z
   .object({
-    name: z.string().min(1),
+    name: z.string().min(1).refine((name) => name !== "default", {
+      message: '"default" is reserved for the built-in lens set',
+    }),
     prompt: z.string().min(1),
   })
   .strict();
@@ -28,7 +30,7 @@ const reviewerSchema = z
 const checkCommand = z.string().trim().min(1, "check command must not be blank");
 const checkSchema = z.union([checkCommand, z.array(checkCommand).min(1, "must list at least one check command")]);
 
-const configSchema = z
+export const configSchema = z
   .object({
     lenses: z.array(z.string().min(1)).min(1, "must list at least one lens").optional(),
     extra_lenses: z.array(lensSchema).optional(),

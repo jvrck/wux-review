@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { parseConfig } from "../../src/review/config";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { configSchema, parseConfig } from "../../src/review/config";
+
+const root = fileURLToPath(new URL("../..", import.meta.url));
 
 describe("parseConfig", () => {
   test("an empty document is the empty config", () => {
@@ -67,6 +71,12 @@ reviewers:
     expect(() => parseConfig("extra_lenses:\n  - name: x\n")).toThrow(".wux-review.yml");
   });
 
+  test('rejects an extra lens named "default", which is reserved for the built-in set', () => {
+    expect(() => parseConfig("extra_lenses:\n  - name: default\n    prompt: Custom default\n")).toThrow(
+      '"default" is reserved',
+    );
+  });
+
   test("rejects unknown keys in nested schemas (strict throughout)", () => {
     expect(() => parseConfig("extra_lenses:\n  - name: x\n    prompt: y\n    bogus: 1\n")).toThrow(
       ".wux-review.yml",
@@ -77,5 +87,15 @@ reviewers:
 
   test("surfaces invalid YAML as a clean error", () => {
     expect(() => parseConfig("lenses: [unterminated\n")).toThrow("invalid YAML");
+  });
+
+  test("documents every top-level config key", () => {
+    const docs = readFileSync(`${root}/docs/commands.md`, "utf8");
+    const headingIndex = docs.indexOf("## Configuration (.wux-review.yml)");
+    expect(headingIndex).toBeGreaterThanOrEqual(0);
+    const section = docs.slice(headingIndex);
+    for (const key of Object.keys(configSchema.shape)) {
+      expect(section).toContain(`\`${key}\``);
+    }
   });
 });

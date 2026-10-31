@@ -2,7 +2,7 @@ import { startMcpServer } from "./mcp/server";
 import { loadConfig as defaultLoadConfig } from "./review/config";
 import { resolveCheck, runCheck as defaultRunCheck } from "./review/check";
 import type { VerdictEnvelope } from "./review/consolidate";
-import type { Lens } from "./review/lenses";
+import { DEFAULT_LENSES, type Lens } from "./review/lenses";
 import { postToPr as defaultPostToPr, type PostResult } from "./review/post";
 import { runReview } from "./review/pipeline";
 import {
@@ -56,7 +56,8 @@ Usage:
 
 Options:
   --pr <n>            Review pull request <n> instead of a local ref.
-  --lenses <list>     Comma-separated lens set override (default: the v1 lens set).
+  --lenses <list>     Comma-separated lens set override. Default set: ${DEFAULT_LENSES.map((lens) => lens.name).join(", ")}.
+                      "default" expands to that set.
   --post-to-pr <n>    Also post the consolidated findings as a comment on PR <n>.
   --session <id>      Use a stable id for the run. A re-review with the same id is
                       context-aware: each leg is fed its own prior-round findings
@@ -74,7 +75,11 @@ Options:
   --json              Machine-readable output (default when stdout is not a TTY).
   --no-json           Force the human-readable renderer.
   -h, --help          Show this help.
-  -v, --version       Show the version.`;
+  -v, --version       Show the version.
+
+Config:
+  .wux-review.yml     Optional repo-root configuration: lenses, extra_lenses, check, reviewers.
+                      See docs/commands.md#configuration-wux-reviewyml.`;
 
 export interface ReviewOptions {
   ref?: string;

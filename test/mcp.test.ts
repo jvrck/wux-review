@@ -33,8 +33,9 @@ const mk = (reviewer: ReviewerName, findings: Finding[]): ReviewResult => ({
   verdict: findings.some((x) => x.severity === "must-fix") ? "block" : "approve",
 });
 
-function fakeReviewers(claude: Finding[], codex: Finding[]): NonNullable<McpDeps["runReviewers"]> {
-  return async (_diff, _lenses, options) => {
+function fakeReviewers(claude: Finding[], codex: Finding[], seenLenses?: string[]): NonNullable<McpDeps["runReviewers"]> {
+  return async (_diff, lenses, options) => {
+    seenLenses?.push(...lenses.map((lens) => lens.name));
     const reviewerOptions = options ?? {};
     const sessionId = reviewerOptions.sessionId ?? "s";
     const round = reviewerOptions.round ?? 1;
@@ -102,6 +103,25 @@ describe("review_diff MCP server", () => {
           expect(env.reviewers).toEqual({ claude: "approve", codex: "block" });
         },
       );
+    } finally {
+      process.chdir(prevCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('resolves the "default" lens alias through the shared MCP pipeline', async () => {
+    const dir = gitRepo();
+    const prevCwd = process.cwd();
+    process.chdir(dir);
+    const lenses: string[] = [];
+    try {
+      await withServer(
+        { loadConfig: async () => ({}), runReviewers: fakeReviewers([], [], lenses) },
+        async (client) => {
+          await client.callTool({ name: "review_diff", arguments: { ref: "HEAD~1", lenses: ["default", "security"] } });
+        },
+      );
+      expect(lenses).toEqual(["correctness", "edge-cases", "security", "regression", "clarity"]);
     } finally {
       process.chdir(prevCwd);
       rmSync(dir, { recursive: true, force: true });
