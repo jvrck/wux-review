@@ -49,7 +49,7 @@ Input (all optional):
 |-------|---------|
 | `ref` | A git ref (`HEAD~1`) or range (`main..HEAD`). Omit to review the working tree. Mutually exclusive with `pr`. |
 | `pr` | Review pull request number `pr`. |
-| `lenses` | Array of lens names overriding the set for this run. |
+| `lenses` | Array of lens names overriding the set for this run. `default` expands to `correctness`, `edge-cases`, `security`, `regression`, `clarity`; it can be combined with repository-defined `extra_lenses`. |
 | `post_to_pr` | Also post the consolidated findings to this PR (additive; a post failure does not fail the review). |
 | `session` | Re-review in the durable session `session` (retained context). |
 

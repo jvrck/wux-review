@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CliDeps, parseReviewArgs, runCli } from "../src/cli";
+import { DEFAULT_LENSES } from "../src/review/lenses";
 import { EndSessionFailure } from "../src/review/session";
 import type { Finding, ReviewerName, ReviewResult } from "../src/review/types";
 
@@ -139,6 +140,13 @@ test("--help prints usage covering every documented flag and exits 0", async () 
   for (const flag of ["--pr", "--lenses", "--post-to-pr", "--session", "--end-session", "--direct", "--inspect", "--json"]) {
     expect(stdout).toContain(flag);
   }
+  for (const lens of DEFAULT_LENSES) {
+    expect(stdout).toContain(lens.name);
+  }
+  for (const configKey of [".wux-review.yml", "lenses", "extra_lenses", "check", "reviewers"]) {
+    expect(stdout).toContain(configKey);
+  }
+  expect(stdout).toContain('"default" expands to that set');
 });
 
 test("--version prints the version and exits 0", async () => {

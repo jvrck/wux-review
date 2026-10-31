@@ -28,11 +28,43 @@ check:
   - pytest -q
 ```
 
+## Configuration (.wux-review.yml)
+
+Configuration is optional. wux-review looks for `.wux-review.yml` at the git
+repository root, or in the current directory when it is not running in a git
+repository. A missing file uses the defaults. `--lenses` takes precedence over
+the file's `lenses` value, which takes precedence over the default lens set.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `lenses` | Non-empty list of lens names | `correctness`, `edge-cases`, `security`, `regression`, `clarity` | Replaces the active lens set. Use `default` inside the list to expand to that default set. |
+| `extra_lenses` | List of `{ name, prompt }` objects | None | Defines repository-specific lenses that can be selected by `lenses` or `--lenses`. `default` is reserved for the built-in alias. |
+| `check` | Non-blank command string or non-empty list of command strings | `bun run typecheck && bun test` | The ordered deterministic commands run by `wux-review check`. |
+| `reviewers` (`reviewers.<leg>.model`) | Optional string, where `<leg>` is `claude` or `codex` | No model pins | Pins the model for either reviewer leg. |
+
+Unknown keys and blank `check` commands are configuration errors. For example:
+
+```yaml
+# .wux-review.yml
+lenses: [default, migrations]
+extra_lenses:
+  - name: migrations
+    prompt: Check that every schema change has a reversible migration.
+check:
+  - bun run typecheck
+  - bun test
+reviewers:
+  claude:
+    model: <model id>
+  codex:
+    model: <model id>
+```
+
 ## Options
 | Flag | Meaning |
 |------|---------|
 | `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). |
-| `--lenses <list>` | Comma-separated lens-set override (default: the v1 lens set). |
+| `--lenses <list>` | Comma-separated lens-set override. The default set is `correctness`, `edge-cases`, `security`, `regression`, `clarity`; `default` expands to that set. |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |
 | `--end-session` | With `--session <id>`, stop that session's recorded reviewer children and exit (cleanup). |

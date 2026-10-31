@@ -11,6 +11,13 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Added
+
+- **Discoverable lens configuration.** `--help`, command documentation, MCP
+  documentation, and the bundled skill now name the default lenses and explain
+  `.wux-review.yml`. Use `default` in a lens list to include the built-in set
+  before adding repository-specific lenses.
+
 ## 2026.10.26
 
 ### Fixed

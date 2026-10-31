@@ -6,6 +6,10 @@ disable-model-invocation: true
 
 Run a **dual review** of the change under review with `wux-review` and drive the result. This skill is explicit-only (`/wux-review`); it only **invokes the CLI** — it never re-implements reviewing. All the substance (two independent reviewers, the lens set, consolidation) lives in `wux-review`.
 
+Repositories can configure lens selection, extra lenses, deterministic checks,
+and reviewer model pins in `.wux-review.yml` at the repository root. See
+`docs/commands.md#configuration-wux-reviewyml` for the full format.
+
 ## 1. Resolve the target
 - A pull request: `--pr <n>`.
 - A ref, a range, or the working tree: pass `<ref>` (e.g. `HEAD~1`, `main..HEAD`), or omit it to review the uncommitted working tree.

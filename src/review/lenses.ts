@@ -38,6 +38,7 @@ export const DEFAULT_LENSES: Lens[] = [
 ];
 
 const DEFAULT_BY_NAME: ReadonlyMap<string, Lens> = new Map(DEFAULT_LENSES.map((lens) => [lens.name, lens]));
+const DEFAULT_LENS_NAMES = DEFAULT_LENSES.map((lens) => lens.name);
 
 export interface ResolveLensesInput {
   cliLenses?: string[]; // from --lenses
@@ -57,20 +58,26 @@ export function resolveLenses(input: ResolveLensesInput = {}): Lens[] {
   // `lenses` (non-empty, enforced by the schema); else the default set. Only an
   // *absent* (undefined) set falls through — an explicitly empty set is NOT
   // silently replaced by the defaults; it trips the guard below.
-  const names = input.cliLenses ?? input.config?.lenses ?? DEFAULT_LENSES.map((lens) => lens.name);
+  const names = input.cliLenses ?? input.config?.lenses ?? DEFAULT_LENS_NAMES;
 
   const resolved: Lens[] = [];
   const seen = new Set<string>();
-  for (const name of names) {
-    if (seen.has(name)) {
-      continue;
+  for (const requestedName of names) {
+    const expandedNames = requestedName === "default" ? DEFAULT_LENS_NAMES : [requestedName];
+    for (const name of expandedNames) {
+      if (seen.has(name)) {
+        continue;
+      }
+      seen.add(name);
+      const lens = registry.get(name);
+      if (!lens) {
+        const validNames = ["default", ...registry.keys()].join(", ");
+        throw new WuxReviewError(
+          `unknown lens: ${name} (valid: ${validNames}; define new lenses under extra_lenses in .wux-review.yml)`,
+        );
+      }
+      resolved.push(lens);
     }
-    seen.add(name);
-    const lens = registry.get(name);
-    if (!lens) {
-      throw new WuxReviewError(`unknown lens: ${name} (define it under extra_lenses in .wux-review.yml)`);
-    }
-    resolved.push(lens);
   }
   if (resolved.length === 0) {
     throw new WuxReviewError("no lenses resolved (an empty lens set is not valid)");
