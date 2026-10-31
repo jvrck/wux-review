@@ -150,7 +150,7 @@ async function requireMergeBase(pr: number, refs: PrRefs, run: Run): Promise<voi
   const result = await run(["git", "-c", "core.quotePath=false", "merge-base", refs.baseRefOid, refs.headRefOid]);
   if (result.code !== 0) {
     throw new WuxReviewError(
-      `PR #${pr} history is not available locally; run: git fetch --deepen=<n> or git fetch --unshallow`,
+      `PR #${pr} history is not available locally; run: git fetch --unshallow`,
     );
   }
 }

@@ -172,7 +172,7 @@ describe("getDiff", () => {
       "git -c core.quotePath=false merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("no merge base", 1),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "PR #42 history is not available locally; run: git fetch --deepen=<n> or git fetch --unshallow",
+      "PR #42 history is not available locally; run: git fetch --unshallow",
     );
   });
 
