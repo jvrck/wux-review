@@ -4,6 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const RUN_NAME = /^r-[0-9a-z]{1,11}-[A-Za-z0-9]{6}$/;
+const LEGACY_HOME_NAME = /^wuxr-codex-home-[A-Za-z0-9]{6}$/;
+const LEGACY_CWD_NAME = /^wuxr-reviewer-cwd-[A-Za-z0-9]{6}$/;
 const RUN_JSON_LIMIT_BYTES = 4 * 1024;
 
 export interface RunJson {
@@ -32,6 +34,7 @@ export interface RunDirectory {
 export interface CleanupPathOptions {
   stateDir?: string;
   tempDir?: string;
+  beforeRename?: (path: string) => void | Promise<void>;
 }
 
 function configuredStateDir(stateDir?: string): string {
@@ -187,13 +190,13 @@ export function validateCleanupDirectory(path: string, options: CleanupPathOptio
   if (hasDirectChild(path, runRoot, (name) => RUN_NAME.test(name))) return true;
 
   const homes = legacyCodexHomeRoot(options);
-  if (hasDirectChild(path, homes, (name) => name.startsWith("wuxr-codex-home-") && name.length > "wuxr-codex-home-".length)) {
+  if (hasDirectChild(path, homes, (name) => LEGACY_HOME_NAME.test(name))) {
     return true;
   }
   const home = dirname(path);
   if (
-    hasDirectChild(path, home, (name) => name.startsWith("wuxr-reviewer-cwd-") && name.length > "wuxr-reviewer-cwd-".length)
-    && hasDirectChild(home, homes, (name) => name.startsWith("wuxr-codex-home-") && name.length > "wuxr-codex-home-".length)
+    hasDirectChild(path, home, (name) => LEGACY_CWD_NAME.test(name))
+    && hasDirectChild(home, homes, (name) => LEGACY_HOME_NAME.test(name))
   ) {
     return true;
   }
@@ -201,7 +204,7 @@ export function validateCleanupDirectory(path: string, options: CleanupPathOptio
   return hasDirectChild(
     path,
     temporaryRoot,
-    (name) => name.startsWith("wuxr-reviewer-cwd-") && name.length > "wuxr-reviewer-cwd-".length,
+    (name) => LEGACY_CWD_NAME.test(name),
   );
 }
 
@@ -236,6 +239,7 @@ export async function removeOwnedDir(path: string, options: CleanupPathOptions =
   await ensureRunsRoot(options);
   const destination = join(trash, `${basename(path)}.${process.pid}.${Math.random().toString(36).slice(2, 10)}`);
   try {
+    await options.beforeRename?.(path);
     await rename(path, destination);
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;

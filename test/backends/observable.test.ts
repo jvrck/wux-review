@@ -31,8 +31,8 @@ const CLAUDE_STREAM = JSON.stringify({
 const CODEX_HOME_ROOT = codexHomeRoot();
 
 test("validateObservableCleanup accepts only expected Codex home shapes", () => {
-  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-abc");
-  const cwd = join(home, "wuxr-reviewer-cwd-def");
+  const home = join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123");
+  const cwd = join(home, "wuxr-reviewer-cwd-DeF456");
   expect(() => validateObservableCleanup([], home, "/tmp/adapter")).not.toThrow();
   expect(() => validateObservableCleanup([], cwd, "/tmp/adapter")).not.toThrow();
   for (const unsafe of [
@@ -41,7 +41,7 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
     join(CODEX_HOME_ROOT, "..", "outside"),
     join(CODEX_HOME_ROOT, "wrong-name"),
     join(tmpdir(), "wuxr-codex-home-old-location"),
-    join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-abc"),
+    join(CODEX_HOME_ROOT, "..", "sibling", "wuxr-codex-home-AbC123"),
   ]) {
     expect(() => validateObservableCleanup([], unsafe, "/tmp/adapter")).toThrow(
       "unsafe observable cleanup directory",

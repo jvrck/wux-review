@@ -149,9 +149,9 @@ describe("PR1 run layout", () => {
   test("T-L2-journal-accept and T-L2-reject-table: only exact owned cleanup shapes pass", async () => {
     const stateDir = await stateRoot();
     const runs = join(stateDir, "wux-review", "runs");
-    const l1 = join(stateDir, "wux-review", "codex-homes", "wuxr-codex-home-old");
-    const l1Cwd = join(l1, "wuxr-reviewer-cwd-old");
-    const l2 = join(tmpdir(), "wuxr-reviewer-cwd-old");
+    const l1 = join(stateDir, "wux-review", "codex-homes", "wuxr-codex-home-AbC123");
+    const l1Cwd = join(l1, "wuxr-reviewer-cwd-DeF456");
+    const l2 = join(tmpdir(), "wuxr-reviewer-cwd-GhI789");
     const run = join(runs, "r-kf12oi-ABC123");
 
     for (const path of [run, l1, l1Cwd, l2]) {
@@ -163,6 +163,42 @@ describe("PR1 run layout", () => {
       join(tmpdir(), "wuxr-codex-home-old"),
       join(runs, "r-not-a-run"),
       `${l2}/`,
+    ]) {
+      expect(validateCleanupDirectory(path, { stateDir, tempDir: tmpdir() })).toBe(false);
+    }
+  });
+
+  test("T-marker-named-dir: an unshipped marker-shaped L1 directory is retained", async () => {
+    const stateDir = await stateRoot();
+    const homes = join(stateDir, "wux-review", "codex-homes");
+    const home = join(homes, "wuxr-codex-home-AbC123");
+    const marker = `${home}.wuxr-last-use`;
+    await mkdir(homes, { recursive: true });
+    await mkdir(home);
+    await mkdir(marker);
+
+    expect(validateCleanupDirectory(marker, { stateDir, tempDir: tmpdir() })).toBe(false);
+    await removeOwnedDir(marker, { stateDir, tempDir: tmpdir() });
+    expect((await stat(marker)).isDirectory()).toBe(true);
+
+    await removeOwnedDir(home, { stateDir, tempDir: tmpdir() });
+    expect(await Bun.file(home).exists()).toBe(false);
+  });
+
+  test("T-legacy-near-misses: L1/L2 cleanup accepts only exact generated names", () => {
+    const stateDir = "/state";
+    const homes = join(stateDir, "wux-review", "codex-homes");
+    const l1 = join(homes, "wuxr-codex-home-AbC123");
+    const l2 = join(tmpdir(), "wuxr-reviewer-cwd-DeF456");
+    for (const path of [
+      join(homes, "wuxr-codex-home-AbC123-extra"),
+      `${l1}.wuxr-last-use`,
+      `${l1}/`,
+      join(homes, "wuxr-codex-home-AbC123", "nested"),
+      join(tmpdir(), "wuxr-reviewer-cwd-DeF456-extra"),
+      `${l2}/`,
+      join(tmpdir(), "wuxr-codex-home-AbC123"),
+      `${homes}/../codex-homes/wuxr-codex-home-AbC123`,
     ]) {
       expect(validateCleanupDirectory(path, { stateDir, tempDir: tmpdir() })).toBe(false);
     }
@@ -187,7 +223,7 @@ describe("PR1 run layout", () => {
     expect(await Bun.file(outside).text()).toBe("keep");
   });
 
-  test("T-swap-to-symlink-before-rename: a replaced owned entry unlinks only the link", async () => {
+  test("T-swap-to-symlink-before-rename: a hook swaps the entry after lstat and before rename", async () => {
     const stateDir = await stateRoot();
     const run = await createRunDirectory({
       stateDir,
@@ -198,10 +234,14 @@ describe("PR1 run layout", () => {
     });
     const outside = join(stateDir, "outside-directory");
     await mkdir(outside);
-    await rm(run.path, { recursive: true });
-    await symlink(outside, run.path);
-
-    await removeOwnedDir(run.path, { stateDir, tempDir: tmpdir() });
+    await removeOwnedDir(run.path, {
+      stateDir,
+      tempDir: tmpdir(),
+      beforeRename: async (path) => {
+        await rm(path, { recursive: true });
+        await symlink(outside, path);
+      },
+    });
 
     expect(await Bun.file(run.path).exists()).toBe(false);
     expect((await stat(outside)).isDirectory()).toBe(true);
@@ -245,9 +285,29 @@ describe("PR1 run layout", () => {
   });
 
   test("T-single-recursive-remover: only the owned remover contains recursive filesystem deletion", async () => {
-    const source = await Bun.file(
-      new URL("../../src/backends/run-layout.ts", import.meta.url),
-    ).text();
-    expect(source.match(/rm\([^\n]*recursive: true/g)?.length).toBe(2);
+    const files = await productionTypeScriptFiles(
+      new URL("../../src/", import.meta.url),
+    );
+    const recursiveFiles: string[] = [];
+    const wrapperFiles: string[] = [];
+    for (const file of files) {
+      const source = await Bun.file(file).text();
+      if (/rm\([^\n]*recursive:\s*true|rmSync\(|rmdir\([^\n]*recursive:\s*true/.test(source)) {
+        recursiveFiles.push(file.pathname);
+      }
+      if (/rm -rf/.test(source)) wrapperFiles.push(file.pathname);
+    }
+    expect(recursiveFiles).toEqual([new URL("../../src/backends/run-layout.ts", import.meta.url).pathname]);
+    expect(wrapperFiles).toEqual([new URL("../../src/backends/observable.ts", import.meta.url).pathname]);
   });
 });
+
+async function productionTypeScriptFiles(directory: URL): Promise<URL[]> {
+  const files: URL[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = new URL(entry.name, directory);
+    if (entry.isDirectory()) files.push(...await productionTypeScriptFiles(new URL(`${entry.name}/`, directory)));
+    else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(path);
+  }
+  return files.sort((a, b) => a.pathname.localeCompare(b.pathname));
+}

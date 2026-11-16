@@ -925,7 +925,7 @@ describe("observable parent recovery", () => {
       `${h.evidence.codex.transientBase}-prompt.md`,
     ];
     const preparedOutput = "/tmp/recovery/prepared-codex-output.txt";
-    const preparedHome = join(CODEX_HOME_ROOT, "wuxr-codex-home-prepared-recovery");
+    const preparedHome = join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123");
     h.files.set(
       `${h.evidence.codex.transientBase}-observable-prepared-cleanup.json`,
       `${JSON.stringify({
@@ -1186,7 +1186,7 @@ describe("observable parent recovery", () => {
     const h = recoveryHarness();
     const promptPath = "/tmp/recovery/recover-review-r1-codex-prompt.md";
     const outputPath = "/tmp/recovery/recover-review-r1-codex-last.txt";
-    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-recovery");
+    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-DeF456");
     Object.assign(h.evidence.codex, {
       cleanupFiles: [promptPath, outputPath],
       cleanupDir,
@@ -1230,7 +1230,7 @@ describe("observable parent recovery", () => {
     });
     const promptPath = "/tmp/recovery/shared-codex-prompt.md";
     const outputPath = "/tmp/recovery/shared-codex-last.txt";
-    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-shared-recovery");
+    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-GhI789");
     for (const entry of [h.evidence.codex, h.codexRetry!]) {
       Object.assign(entry, {
         cleanupFiles: [promptPath, outputPath],

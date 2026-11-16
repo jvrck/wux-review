@@ -33,7 +33,7 @@ const CODEX_COMMAND = JSON.stringify({
   item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
-const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
+const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-AbC123");
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
 
@@ -268,7 +268,7 @@ function harness(opts: Opts = {}) {
       cwdPrepareCalls++;
       const path = parentDir === undefined
         ? REVIEWER_CWD
-        : `${parentDir}/wuxr-reviewer-cwd-test`;
+        : `${parentDir}/wuxr-reviewer-cwd-AbC123`;
       return {
         path,
         cleanup: async () => {
@@ -1128,7 +1128,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-test"),
+      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123"),
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
@@ -1160,7 +1160,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-test"),
+      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123"),
       abortOnStop: abort,
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
@@ -1409,6 +1409,24 @@ describe("observable Wux adapter", () => {
       expect(await Bun.file(donePath).text()).toBe("0");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("T-wrapper-allowlist: cleanup mv and rm helpers use the fixed PATH", () => {
+    const script = buildObservableWrapperScript({
+      argsPath: "/tmp/args",
+      stdoutPath: "/tmp/stdout",
+      stderrPath: "/tmp/stderr",
+      donePath: "/tmp/done",
+      readyPath: "/tmp/ready",
+      cleanupFiles: ["/tmp/prompt"],
+      cleanupDir: "/state/wux-review/runs/r-kf12oi-ABC123",
+      cleanupTrashDir: "/state/wux-review/runs/.trash",
+    });
+    const helpers = script.split("\n").filter((line) => /\b(?:mv|rm)\b/.test(line));
+    expect(helpers.length).toBeGreaterThanOrEqual(3);
+    for (const line of helpers) {
+      expect(line).toContain("PATH=/usr/bin:/bin");
     }
   });
 
