@@ -66,6 +66,14 @@ const PR_REFS = {
 };
 const BASE_BLOB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HEAD_BLOB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const GITLINK_ONE = "cccccccccccccccccccccccccccccccccccccccc";
+const GITLINK_TWO = "dddddddddddddddddddddddddddddddddddddddd";
+
+function installedGitAtLeast(major: number, minor: number): boolean {
+  const result = Bun.spawnSync(["git", "--version"], { stdout: "pipe" });
+  const match = /^git version (\d+)\.(\d+)/.exec(result.stdout.toString());
+  return match !== null && (Number(match[1]) > major || (Number(match[1]) === major && Number(match[2]) >= minor));
+}
 
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
   const writes: string[] = [];
@@ -112,7 +120,28 @@ describe("getDiff", () => {
     expect(stderr).toContain(`reviewing ${range} from local git`);
   });
 
-  test("large-PR fallback never lazily fetches promised blobs from a partial clone", async () => {
+  test("submodule pointer additions and updates do not require gitlink objects locally", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok("base\n"),
+      [`git diff --no-ext-diff --no-renames --raw -z ${range}`]: ok(
+        `:000000 160000 ${"0".repeat(40)} ${GITLINK_ONE} A\0deps/added\0:160000 160000 ${GITLINK_ONE} ${GITLINK_TWO} M\0deps/updated\0`,
+      ),
+      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+      [`git -c core.quotePath=false diff -z --name-only ${range}`]: z("deps/added", "deps/updated"),
+    });
+
+    const { result } = await captureStderr(() => getDiff({ kind: "pr", pr: 42 }, run));
+    expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["deps/added", "deps/updated"] });
+  });
+
+  // Git v2.45 introduced --no-lazy-fetch; older Git is covered by the mocked
+  // fail-closed test below rather than this real partial-clone integration test.
+  test.skipIf(!installedGitAtLeast(2, 45))("large-PR fallback never lazily fetches promised blobs from a partial clone", async () => {
     const root = mkdtempSync(join(tmpdir(), "wuxr-partial-clone-"));
     const source = join(root, "source");
     const remote = join(root, "remote");

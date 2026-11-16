@@ -142,10 +142,12 @@ async function requireLocalRangeObjects(pr: number, refs: PrRefs, range: string,
   const raw = rawResult.stdout;
   const objectIds = new Set<string>();
   for (const entry of raw.split("\0")) {
-    const match = /^:[0-7]+ [0-7]+ ([0-9a-f]+) ([0-9a-f]+) /.exec(entry);
-    if (match) {
-      objectIds.add(match[1]!);
-      objectIds.add(match[2]!);
+    const match = /^:([0-7]+) ([0-7]+) ([0-9a-f]+) ([0-9a-f]+) /.exec(entry);
+    // Gitlinks name commits from a submodule's object store, never this
+    // superproject's, so their object IDs cannot be checked here.
+    if (match && match[1] !== "160000" && match[2] !== "160000") {
+      objectIds.add(match[3]!);
+      objectIds.add(match[4]!);
     }
   }
   for (const objectId of objectIds) {
