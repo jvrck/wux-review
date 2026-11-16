@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getDiff } from "../../src/review/diff";
 import type { Run, RunResult } from "../../src/runtime/exec";
 
@@ -31,6 +34,9 @@ const MAXIMUM_FILES_RESPONSE = await Bun.file(
 const DIRECT_TOO_LARGE_RESPONSE = await Bun.file(
   new URL("../fixtures/gh-pr-diff-too-large.stderr", import.meta.url),
 ).text();
+// GitHub's documented line-limit wording. A live response was not available
+// when this fixture was added, so this remains a literal compatibility probe.
+const MAXIMUM_LINES_RESPONSE = "HTTP 406: the diff exceeded the maximum number of lines\n";
 
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
   const writes: string[] = [];
@@ -46,9 +52,49 @@ async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stde
   }
 }
 
+async function captureStderrError(fn: () => Promise<unknown>): Promise<{ error: unknown; stderr: string }> {
+  const writes: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+    throw new Error("expected rejection");
+  } catch (error) {
+    return { error, stderr: writes.join("") };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
+
+function git(root: string, args: string[]): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr.toString()}`);
+  return result.stdout.toString();
+}
+
+function localGitRun(root: string, refs: typeof PR_REFS): Run {
+  return async (cmd) => {
+    if (cmd.join(" ") === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
+    if (cmd.join(" ") === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") {
+      return ok(JSON.stringify(refs));
+    }
+    const process = Bun.spawn(cmd, { cwd: root, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+      process.exited,
+    ]);
+    return { code, stdout, stderr };
+  };
+}
+
 function largePrFallbackRun(
   stderr: string,
   raw = `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`,
+  diff = SAMPLE_DIFF,
 ): Run {
   const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
   return mockRun({
@@ -60,7 +106,7 @@ function largePrFallbackRun(
     "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
     "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok(`${PR_REFS.baseRefOid}\n`),
     [`git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`]: ok(raw),
-    [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+    [`git -c core.quotePath=false diff ${range}`]: ok(diff),
   });
 }
 
@@ -80,7 +126,7 @@ describe("getDiff", () => {
   // That public PR had 375 changed files. Keep both observed GitHub 406 error
   // shapes pinned so a response-format change cannot silently disable fallback.
   test("large PR GitHub error forms fall back to local base...head", async () => {
-    for (const stderr of [MAXIMUM_FILES_RESPONSE, DIRECT_TOO_LARGE_RESPONSE]) {
+    for (const stderr of [MAXIMUM_FILES_RESPONSE, DIRECT_TOO_LARGE_RESPONSE, MAXIMUM_LINES_RESPONSE]) {
       const { result, stderr: notice } = await captureStderr(() =>
         getDiff({ kind: "pr", pr: 42 }, largePrFallbackRun(stderr)));
       expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
@@ -105,6 +151,73 @@ describe("getDiff", () => {
       largePrFallbackRun(DIRECT_TOO_LARGE_RESPONSE, raw),
     );
     expect(files).toEqual(["renamed.ts", "copied.ts", "later.ts"]);
+  });
+
+  test("fetch hints use a qualified base ref that works for normal and option-like branches", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wuxr-fetch-hint-"));
+    try {
+      for (const branch of ["main", "-weird"]) {
+        const source = join(root, `source-${branch === "main" ? "main" : "weird"}`);
+        const origin = join(root, `origin-${branch === "main" ? "main" : "weird"}.git`);
+        const consumer = join(root, `consumer-${branch === "main" ? "main" : "weird"}`);
+        git(root, ["init", "-q", source]);
+        git(source, ["config", "user.email", "test@example.com"]);
+        git(source, ["config", "user.name", "Test"]);
+        writeFileSync(join(source, "x.txt"), "base\n");
+        git(source, ["add", "x.txt"]);
+        git(source, ["commit", "-qm", "base"]);
+        const base = git(source, ["rev-parse", "HEAD"]).trim();
+        writeFileSync(join(source, "x.txt"), "head\n");
+        git(source, ["commit", "-am", "head", "-q"]);
+        const head = git(source, ["rev-parse", "HEAD"]).trim();
+        git(root, ["init", "--bare", "-q", origin]);
+        git(source, ["remote", "add", "origin", origin]);
+        git(source, ["push", "-q", "origin", `${base}:refs/heads/${branch}`, `${head}:refs/pull/42/head`]);
+        git(root, ["init", "-q", consumer]);
+        git(consumer, ["remote", "add", "origin", origin]);
+
+        const refs = { baseRefOid: base, headRefOid: head, baseRefName: branch };
+        let message = "";
+        try {
+          await getDiff({ kind: "pr", pr: 42 }, localGitRun(consumer, refs));
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error);
+        }
+        const hint = message.slice(message.indexOf("run: ") + "run: ".length);
+        expect(hint).toBe(`git fetch origin 'refs/heads/${branch}' 'pull/42/head'`);
+        expect(Bun.spawnSync(["/bin/sh", "-c", hint], { cwd: consumer }).exitCode).toBe(0);
+        expect(git(consumer, ["cat-file", "-e", `${base}^{commit}`])).toBe("");
+        expect(git(consumer, ["cat-file", "-e", `${head}^{commit}`])).toBe("");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("fallback errors before its notice when the local diff is empty", async () => {
+    const run = largePrFallbackRun(
+      DIRECT_TOO_LARGE_RESPONSE,
+      `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`,
+      "",
+    );
+    const { error, stderr } = await captureStderrError(() => getDiff({ kind: "pr", pr: 42 }, run));
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("nothing to review");
+    expect(stderr).toBe("");
+  });
+
+  test("raw parser and partial-clone config failures fail closed", async () => {
+    for (const raw of ["not metadata\0", `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0`]) {
+      await expect(getDiff({ kind: "pr", pr: 42 }, largePrFallbackRun(DIRECT_TOO_LARGE_RESPONSE, raw))).rejects.toThrow(
+        /malformed|incomplete/,
+      );
+    }
+    const configFailure = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("fatal: config read failure", 2),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, configFailure)).rejects.toThrow("config read failure");
   });
 
   test("partial clones fail closed before fallback traversal", async () => {
@@ -159,7 +272,7 @@ describe("getDiff", () => {
       "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("fatal: not a valid object name", 128),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "run: git fetch origin 'main' 'pull/42/head'",
+      "run: git fetch origin 'refs/heads/main' 'pull/42/head'",
     );
   });
 
