@@ -18,7 +18,8 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   `base...head` range if both commits and their common history are already
   available. It never fetches automatically and prints a fetch command when a
   required object or shallow history is unavailable; unrelated histories fail
-  clearly instead of producing a partial review.
+  clearly instead of producing a partial review. Partial clones require Git
+  2.45 or newer; older versions fail before local traversal.
 
 ## 2026.10.31
 

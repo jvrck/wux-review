@@ -1,5 +1,5 @@
 import { WuxReviewError } from "../runtime/errors";
-import { run as defaultRun, type Run } from "../runtime/exec";
+import { run as defaultRun, type Run, type RunResult } from "../runtime/exec";
 import type { Target } from "./target";
 
 export interface ReviewDiff {
@@ -77,7 +77,12 @@ interface PrRefs {
   baseRefName: string;
 }
 
-const NO_LAZY_GIT = ["env", "GIT_NO_LAZY_FETCH=1", "git"];
+interface FallbackGit {
+  run: Run;
+  noLazyFetch: boolean;
+}
+
+const MIN_NO_LAZY_FETCH_GIT = [2, 45, 0] as const;
 
 function isPrDiffTooLarge(stderr: string): boolean {
   const detail = stderr.toLowerCase();
@@ -90,20 +95,21 @@ function isPrDiffTooLarge(stderr: string): boolean {
 
 async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   const refs = await getPrRefs(pr, run);
+  const git = await createFallbackGit(pr, refs, run);
   for (const sha of [refs.baseRefOid, refs.headRefOid]) {
-    await requireLocalObject(pr, refs, sha, `${sha}^{commit}`, run);
+    await requireLocalObject(pr, refs, sha, `${sha}^{commit}`, git);
   }
 
   const mergeBaseCommand = ["merge-base", refs.baseRefOid, refs.headRefOid];
-  const mergeBase = await noLazyGit(run, mergeBaseCommand);
+  const mergeBase = await fallbackGit(git, mergeBaseCommand);
   if (mergeBase.code !== 0) {
     if (mergeBase.code !== 1) {
-      throw captureNoLazyError(mergeBaseCommand, mergeBase.stderr, mergeBase.code);
+      throw captureFallbackError(git, mergeBaseCommand, mergeBase.stderr, mergeBase.code);
     }
     const shallowCommand = ["rev-parse", "--is-shallow-repository"];
-    const shallow = await noLazyGit(run, shallowCommand);
+    const shallow = await fallbackGit(git, shallowCommand);
     if (shallow.code !== 0) {
-      throw captureNoLazyError(shallowCommand, shallow.stderr, shallow.code);
+      throw captureFallbackError(git, shallowCommand, shallow.stderr, shallow.code);
     }
     if (shallow.stdout.trim() === "true") {
       throw new WuxReviewError(
@@ -116,15 +122,24 @@ async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   }
 
   const range = `${refs.baseRefOid}...${refs.headRefOid}`;
-  await requireLocalRangeObjects(pr, refs, range, run);
+  await requireLocalRangeObjects(pr, refs, range, git);
   process.stderr.write(
     `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
-  return finalize(await noLazyGitDiff(run, [range]), await noLazyGitNames(run, [range]));
+  return finalize(await fallbackGitDiff(git, [range]), await fallbackGitNames(git, [range]));
 }
 
-async function requireLocalRangeObjects(pr: number, refs: PrRefs, range: string, run: Run): Promise<void> {
-  const raw = await noLazyGitOut(run, ["diff", "--no-ext-diff", "--no-renames", "--raw", "-z", range]);
+async function requireLocalRangeObjects(pr: number, refs: PrRefs, range: string, git: FallbackGit): Promise<void> {
+  const command = ["diff", "--no-ext-diff", "--no-renames", "--raw", "-z", range];
+  const rawResult = await fallbackGit(git, command);
+  if (rawResult.code !== 0) {
+    const missingTree = /unable to read tree \(([0-9a-f]+)\)/i.exec(rawResult.stderr);
+    if (missingTree) {
+      await requireLocalObject(pr, refs, missingTree[1]!, missingTree[1]!, git, range);
+    }
+    throw captureFallbackError(git, command, rawResult.stderr, rawResult.code);
+  }
+  const raw = rawResult.stdout;
   const objectIds = new Set<string>();
   for (const entry of raw.split("\0")) {
     const match = /^:[0-7]+ [0-7]+ ([0-9a-f]+) ([0-9a-f]+) /.exec(entry);
@@ -135,7 +150,7 @@ async function requireLocalRangeObjects(pr: number, refs: PrRefs, range: string,
   }
   for (const objectId of objectIds) {
     if (!/^0+$/.test(objectId)) {
-      await requireLocalObject(pr, refs, objectId, objectId, run, range);
+      await requireLocalObject(pr, refs, objectId, objectId, git, range);
     }
   }
 }
@@ -145,24 +160,25 @@ async function requireLocalObject(
   refs: PrRefs,
   objectId: string,
   objectExpression: string,
-  run: Run,
+  git: FallbackGit,
   range?: string,
 ): Promise<void> {
   const command = ["cat-file", "-e", objectExpression];
-  const object = await noLazyGit(run, command);
+  const object = await fallbackGit(git, command);
   if (object.code === 0) return;
-  if (isMissingObject(object.stderr, objectExpression)) {
+  if (isMissingObject(object.code, object.stderr, objectExpression)) {
     const subject = range ? `objects required for ${range}` : objectId;
     throw new WuxReviewError(
       `PR #${pr} is too large for gh pr diff and ${subject} isn't available locally; ${fetchHint(pr, refs)}`,
     );
   }
-  throw captureNoLazyError(command, object.stderr, object.code);
+  throw captureFallbackError(git, command, object.stderr, object.code);
 }
 
-function isMissingObject(stderr: string, objectExpression: string): boolean {
+function isMissingObject(code: number, stderr: string, objectExpression: string): boolean {
   const detail = stderr.toLowerCase();
   return (
+    (code === 1 && detail.trim() === "") ||
     detail.includes(`not a valid object name ${objectExpression.toLowerCase()}`) ||
     detail.includes(`could not fetch ${objectExpression.toLowerCase()} from promisor remote`)
   );
@@ -170,6 +186,52 @@ function isMissingObject(stderr: string, objectExpression: string): boolean {
 
 function fetchHint(pr: number, refs: PrRefs): string {
   return `run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`;
+}
+
+async function createFallbackGit(pr: number, refs: PrRefs, run: Run): Promise<FallbackGit> {
+  if (!(await isPartialClone(run))) {
+    return { run, noLazyFetch: false };
+  }
+  const version = await gitVersion(run);
+  if (!atLeast(version, MIN_NO_LAZY_FETCH_GIT)) {
+    throw new WuxReviewError(
+      `PR #${pr} is too large for gh pr diff and this partial clone requires Git 2.45 or newer to avoid lazy fetching; upgrade Git before retrying`,
+    );
+  }
+  return { run, noLazyFetch: true };
+}
+
+async function isPartialClone(run: Run): Promise<boolean> {
+  if (await configExists(run, ["--get", "extensions.partialClone"])) return true;
+  const command = ["git", "config", "--get-regexp", "^remote\\..*\\.promisor$"];
+  const result = await run(command);
+  if (result.code === 1) return false;
+  if (result.code !== 0) throw captureError(command, result.stderr, result.code);
+  return result.stdout.split("\n").some((line) => /\s(?:true|yes|on|1)$/i.test(line));
+}
+
+async function configExists(run: Run, args: string[]): Promise<boolean> {
+  const command = ["git", "config", ...args];
+  const result = await run(command);
+  if (result.code === 0) return result.stdout.trim() !== "";
+  if (result.code === 1) return false;
+  throw captureError(command, result.stderr, result.code);
+}
+
+async function gitVersion(run: Run): Promise<readonly [number, number, number]> {
+  const command = ["git", "--version"];
+  const result = await run(command);
+  if (result.code !== 0) throw captureError(command, result.stderr, result.code);
+  const match = /^git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(result.stdout.trim());
+  if (!match) throw new WuxReviewError(`cannot determine Git version from: ${result.stdout.trim() || "empty output"}`);
+  return [Number(match[1]), Number(match[2]), Number(match[3] ?? "0")];
+}
+
+function atLeast(version: readonly number[], minimum: readonly number[]): boolean {
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (version[index]! !== minimum[index]!) return version[index]! > minimum[index]!;
+  }
+  return true;
 }
 
 async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
@@ -216,8 +278,8 @@ async function gitDiff(run: Run, args: string[]): Promise<string> {
   return gitOut(run, ["diff", ...args]);
 }
 
-async function noLazyGitDiff(run: Run, args: string[]): Promise<string> {
-  return noLazyGitOut(run, ["-c", "core.quotePath=false", "diff", ...args]);
+async function fallbackGitDiff(git: FallbackGit, args: string[]): Promise<string> {
+  return fallbackGitOut(git, ["-c", "core.quotePath=false", "diff", ...args]);
 }
 
 // Changed-file list, NUL-separated (`-z`) with `core.quotePath=false`, so paths
@@ -227,24 +289,27 @@ async function gitNames(run: Run, args: string[]): Promise<string[]> {
   return splitNul(await gitOut(run, ["diff", "-z", "--name-only", ...args]));
 }
 
-async function noLazyGitNames(run: Run, args: string[]): Promise<string[]> {
-  return splitNul(await noLazyGitOut(run, ["-c", "core.quotePath=false", "diff", "-z", "--name-only", ...args]));
+async function fallbackGitNames(git: FallbackGit, args: string[]): Promise<string[]> {
+  return splitNul(await fallbackGitOut(git, ["-c", "core.quotePath=false", "diff", "-z", "--name-only", ...args]));
 }
 
 async function gitOut(run: Run, args: string[]): Promise<string> {
   return capture(run, ["git", "-c", "core.quotePath=false", ...args]);
 }
 
-async function noLazyGitOut(run: Run, args: string[]): Promise<string> {
-  const result = await noLazyGit(run, args);
+async function fallbackGitOut(git: FallbackGit, args: string[]): Promise<string> {
+  const result = await fallbackGit(git, args);
   if (result.code !== 0) {
-    throw captureNoLazyError(args, result.stderr, result.code);
+    throw captureFallbackError(git, args, result.stderr, result.code);
   }
   return result.stdout;
 }
 
-async function noLazyGit(run: Run, args: string[]): Promise<Awaited<ReturnType<Run>>> {
-  return run([...NO_LAZY_GIT, ...args]);
+// Git v2.45 introduced --no-lazy-fetch; its release notes document the option:
+// https://github.com/git/git/blob/master/Documentation/RelNotes/2.45.0.adoc
+async function fallbackGit(git: FallbackGit, args: string[]): Promise<RunResult> {
+  const prefix = git.noLazyFetch ? ["git", "--no-lazy-fetch"] : ["git"];
+  return git.run([...prefix, ...args]);
 }
 
 // `git diff --no-index` exits 1 when the inputs differ (which is always, here:
@@ -272,8 +337,9 @@ function captureError(cmd: string[], stderr: string, code: number): WuxReviewErr
   return new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
 }
 
-function captureNoLazyError(args: string[], stderr: string, code: number): WuxReviewError {
-  return captureError(["git", ...args], stderr, code);
+function captureFallbackError(git: FallbackGit, args: string[], stderr: string, code: number): WuxReviewError {
+  const prefix = git.noLazyFetch ? ["git", "--no-lazy-fetch"] : ["git"];
+  return captureError([...prefix, ...args], stderr, code);
 }
 
 function splitNul(out: string): string[] {

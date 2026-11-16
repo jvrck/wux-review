@@ -14,11 +14,13 @@ const z = (...parts: string[]): RunResult => ok(parts.map((p) => `${p}\0`).join(
 // Build a mock runner from a map of "joined command" -> RunResult.
 function mockRun(table: Record<string, RunResult>): Run {
   return async (cmd: string[]) => {
-    const key = (cmd[0] === "env" && cmd[1] === "GIT_NO_LAZY_FETCH=1" ? cmd.slice(2) : cmd).join(" ");
-    if (!(key in table)) {
-      throw new Error(`unexpected command: ${key}`);
+    const key = (cmd[0] === "git" && cmd[1] === "--no-lazy-fetch" ? ["git", ...cmd.slice(2)] : cmd).join(" ");
+    if (key in table) return table[key]!;
+    if (key === "git config --get extensions.partialClone" || key === "git config --get-regexp ^remote\\..*\\.promisor$") {
+      return fail("", 1);
     }
-    return table[key]!;
+    if (key === "git --version") return ok("git version 2.45.0\n");
+    throw new Error(`unexpected command: ${key}`);
   };
 }
 
@@ -30,10 +32,12 @@ function git(root: string, args: string[]): string {
   return result.stdout.toString();
 }
 
-function missingObjects(root: string): number {
+function missingObjectIds(root: string): string[] {
   return git(root, ["rev-list", "--objects", "--missing=print", "HEAD"])
     .split("\n")
-    .filter((line) => line.startsWith("?")).length;
+    .filter((line) => line.startsWith("?"))
+    .map((line) => line.slice(1))
+    .sort();
 }
 
 function realGitRun(root: string, refs: typeof PR_REFS): Run {
@@ -112,7 +116,6 @@ describe("getDiff", () => {
     const root = mkdtempSync(join(tmpdir(), "wuxr-partial-clone-"));
     const source = join(root, "source");
     const remote = join(root, "remote");
-    const clone = join(root, "clone");
     try {
       git(root, ["init", "-q", "-b", "main", source]);
       git(source, ["config", "user.email", "test@example.com"]);
@@ -124,23 +127,38 @@ describe("getDiff", () => {
       git(source, ["commit", "-am", "head", "-q"]);
       git(root, ["clone", "-q", "--bare", source, remote]);
       git(remote, ["config", "uploadpack.allowFilter", "true"]);
-      git(root, ["clone", "-q", "--filter=blob:none", "--no-checkout", `file://${remote}`, clone]);
-
       const refs = {
         baseRefOid: git(source, ["rev-parse", "HEAD^"]).trim(),
         headRefOid: git(source, ["rev-parse", "HEAD"]).trim(),
         baseRefName: "main",
       };
-      const before = missingObjects(clone);
-      expect(before).toBeGreaterThan(0);
+      for (const filter of ["blob:none", "tree:0"]) {
+        const clone = join(root, `clone-${filter.replace(":", "-")}`);
+        git(root, ["clone", "-q", `--filter=${filter}`, "--no-checkout", `file://${remote}`, clone]);
+        const before = missingObjectIds(clone);
+        expect(before.length).toBeGreaterThan(0);
 
-      await expect(getDiff({ kind: "pr", pr: 42 }, realGitRun(clone, refs))).rejects.toThrow(
-        "run: git fetch origin 'main' 'pull/42/head'",
-      );
-      expect(missingObjects(clone)).toBe(before);
+        await expect(getDiff({ kind: "pr", pr: 42 }, realGitRun(clone, refs))).rejects.toThrow(
+          "run: git fetch origin 'main' 'pull/42/head'",
+        );
+        expect(missingObjectIds(clone)).toEqual(before);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("partial clones fail closed when Git lacks --no-lazy-fetch", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get-regexp ^remote\\..*\\.promisor$": ok("remote.origin.promisor true\n"),
+      "git --version": ok("git version 2.44.4\n"),
+    });
+
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "this partial clone requires Git 2.45 or newer to avoid lazy fetching",
+    );
   });
 
   test("other gh PR diff failures retain their original error", async () => {
