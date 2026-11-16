@@ -78,7 +78,7 @@ interface PrRefs {
 }
 
 function isLargePrDiffError(stderr: string): boolean {
-  return /the diff exceeded the maximum number of files|HTTP 406:\s*Diff too large/i.test(stderr);
+  return /the diff exceeded the maximum number of (?:files|lines)|HTTP 406:\s*Diff too large/i.test(stderr);
 }
 
 async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
@@ -113,10 +113,11 @@ async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
     gitDiff(run, [range]),
     gitRawNames(run, range),
   ]);
+  const reviewDiff = finalize(diff, files);
   process.stderr.write(
     `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
-  return finalize(diff, files);
+  return reviewDiff;
 }
 
 async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
@@ -181,7 +182,7 @@ async function requireLocalCommit(pr: number, refs: PrRefs, sha: string, run: Ru
   if (!/not a valid object|invalid object|bad object|unknown revision/i.test(result.stderr)) {
     throw captureError(command, result.stderr, result.code);
   }
-  const fetch = `git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`;
+  const fetch = `git fetch origin ${shellQuote(`refs/heads/${refs.baseRefName}`)} ${shellQuote(`pull/${pr}/head`)}`;
   throw new WuxReviewError(
     `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: ${fetch}`,
   );
