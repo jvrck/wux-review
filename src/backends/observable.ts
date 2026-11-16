@@ -2408,11 +2408,12 @@ async function cleanupTransient(
   paths: string[],
 ): Promise<void> {
   try {
-    await Promise.all(paths.map((path) =>
-      validateCleanupDirectory(path)
-        ? removeOwnedDir(path)
-        : deps.rm(path),
-    ));
+    await Promise.all(paths.map(async (path) => {
+      if (validateCleanupDirectory(path)) {
+        await removeOwnedDir(path);
+      }
+      await deps.rm(path);
+    }));
   } catch (error) {
     throw new WuxReviewError(`observable transient cleanup failed: ${errorDetail(error)}`);
   }

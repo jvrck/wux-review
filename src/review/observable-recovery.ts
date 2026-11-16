@@ -515,9 +515,12 @@ async function cleanupSharedRecoveryResources(
     if (record.cleanupDir !== undefined) paths.add(record.cleanupDir);
   }
   try {
-    await Promise.all([...paths].map((path) =>
-      validateCleanupDirectory(path) ? removeOwnedDir(path) : observable.rm(path),
-    ));
+    await Promise.all([...paths].map(async (path) => {
+      if (validateCleanupDirectory(path)) {
+        await removeOwnedDir(path);
+      }
+      await observable.rm(path);
+    }));
   } catch (error) {
     throw new WuxReviewError(
       `observable shared recovery cleanup failed: ${errorDetail(error)}`,
