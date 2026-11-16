@@ -37,6 +37,7 @@ export interface BackendOptions {
   recordPreparedChild?: (
     childName: string,
     attempt: number,
+    cleanupDir?: string,
   ) => void | Promise<void>;
   recordEvidence?: (evidence: LegExecutionEvidence) => void | Promise<void>;
   signal?: AbortSignal;
@@ -81,6 +82,7 @@ export interface RunReviewersOptions {
     reviewer: ReviewerName,
     childName: string,
     attempt: number,
+    cleanupDir?: string,
   ) => void | Promise<void>;
   recordObservableEvidence?: (evidence: LegExecutionEvidence) => void | Promise<void>;
   finishObservableRound?: (
@@ -222,8 +224,8 @@ export async function runReviewers(
       round,
       reviewer: "claude",
       signal: abort.signal,
-      recordPreparedChild: (childName, attempt) =>
-        options.recordObservablePreparedChild?.("claude", childName, attempt),
+      recordPreparedChild: (childName, attempt, cleanupDir) =>
+        options.recordObservablePreparedChild?.("claude", childName, attempt, cleanupDir),
       recordEvidence: async (record) => {
         upsertObservableEvidence(evidence.claude, record);
         await options.recordObservableEvidence?.(record);
@@ -239,8 +241,8 @@ export async function runReviewers(
       round,
       reviewer: "codex",
       signal: abort.signal,
-      recordPreparedChild: (childName, attempt) =>
-        options.recordObservablePreparedChild?.("codex", childName, attempt),
+      recordPreparedChild: (childName, attempt, cleanupDir) =>
+        options.recordObservablePreparedChild?.("codex", childName, attempt, cleanupDir),
       recordEvidence: async (record) => {
         upsertObservableEvidence(evidence.codex, record);
         await options.recordObservableEvidence?.(record);

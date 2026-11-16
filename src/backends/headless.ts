@@ -1,8 +1,8 @@
 import { constants as fsConstants } from "node:fs";
 import type { Dirent } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { chmod, copyFile, mkdir, open, readdir, rm } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { errorDetail, oneLine, WuxReviewError } from "../runtime/errors";
 import type { Backend, BackendOptions } from "../review/reviewers";
 import type { ReviewerName } from "../review/types";
@@ -19,6 +19,7 @@ import {
   MACHINE_RESULT_EVENT_LIMIT_BYTES,
 } from "./observable-events";
 import { codexHomeRoot } from "./codex-home";
+import { createRunDirectory } from "./run-layout";
 import type { CodexExecutionSignal } from "./observable-events";
 
 // Headless reviewer legs: drive each model as a one-shot, non-interactive
@@ -360,12 +361,20 @@ export interface CodexHome {
   // hands this exact path to its wrapper so a parent interruption cannot delete
   // CODEX_HOME while the bounded child is still using it.
   observableCleanupPath?: string;
+  reviewerCwdPath?: string;
 }
 
 export interface ReviewerCwd {
   path: string;
   cleanup: () => Promise<void>;
   observableCleanupPath?: string;
+}
+
+interface RunBudget {
+  kind: "claude" | "codex";
+  createdMs: number;
+  deadlineMs: number;
+  legMaxMs: number;
 }
 
 export interface HeadlessBackendDeps {
@@ -400,10 +409,10 @@ export interface HeadlessBackendDeps {
   // legs never contend on shared mutable state or inherit ambient customizations.
   // The boolean remains an injected test seam; production always enables it.
   isolateCodexHome: boolean;
-  prepareCodexHome: () => Promise<CodexHome>;
+  prepareCodexHome: (budget?: RunBudget) => Promise<CodexHome>;
   // A private per-leg working directory prevents project-instruction discovery
   // from falling back to a shared, attacker-plantable path under /tmp.
-  prepareReviewerCwd: (parentDir?: string) => Promise<ReviewerCwd>;
+  prepareReviewerCwd: (parentDir?: string, budget?: RunBudget) => Promise<ReviewerCwd>;
   // One-line operational notices (for example, retry progress). stderr in
   // production; captured in tests.
   warn: (message: string) => void;
@@ -667,27 +676,25 @@ async function readBoundedCodexConfig(path: string): Promise<CodexConfigRead> {
 // reduced to model/provider selection only. No shared-home fallback is safe:
 // setup failure must block the leg rather than re-enable hooks, MCP, plugins,
 // skills, or notify commands.
-export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
+export async function prepareIsolatedCodexHome(budget?: RunBudget): Promise<CodexHome> {
   const source = resolve(process.env.CODEX_HOME ?? join(homedir(), ".codex"));
-  let createdHome: string | undefined;
+  let run;
   try {
-    const root = await secureCodexHomeRoot();
-    await pruneStaleCodexHomes(root);
-    createdHome = await mkdtemp(join(root, "wuxr-codex-home-"));
-    await chmod(createdHome, 0o700);
+    const createdMs = budget?.createdMs ?? Date.now();
+    run = await createRunDirectory({
+      kind: "codex",
+      createdMs,
+      deadlineMs: budget?.deadlineMs ?? createdMs + DEFAULT_CODEX_MAX_TIMEOUT_MS + 10 * 60 * 1000,
+      legMaxMs: budget?.legMaxMs ?? DEFAULT_CODEX_MAX_TIMEOUT_MS,
+    });
   } catch (error) {
-    if (createdHome !== undefined) {
-      await rm(createdHome, { recursive: true, force: true }).catch(() => undefined);
-    }
     throw new WuxReviewError(
       `codex reviewer: cannot create secure per-leg CODEX_HOME: ${errorDetail(error)}`,
     );
   }
-  const home = createdHome;
+  const home = run.home!;
   const cleanup = async () => {
-    // The home holds only copies + codex's own throwaway state, so removing it
-    // cannot touch the user's real ~/.codex.
-    await rm(home, { recursive: true, force: true }).catch(() => undefined);
+    await run.cleanup().catch(() => undefined);
   };
   try {
     let copiedAuth = false;
@@ -755,7 +762,8 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
       env: { CODEX_HOME: home },
       cleanup,
       diagnostics,
-      observableCleanupPath: home,
+      observableCleanupPath: run.path,
+      reviewerCwdPath: run.cwd,
     };
   } catch (error) {
     await cleanup();
@@ -767,79 +775,25 @@ export async function prepareIsolatedCodexHome(): Promise<CodexHome> {
 }
 
 export { codexHomeRoot } from "./codex-home";
-
-async function secureCodexHomeRoot(): Promise<string> {
-  const root = codexHomeRoot();
+export async function prepareReviewerCwd(_parentDir?: string, budget?: RunBudget): Promise<ReviewerCwd> {
   try {
-    const appRoot = dirname(root);
-    // XDG_STATE_HOME itself may legitimately be symlink-managed, but the
-    // wux-review component we create must not redirect private homes elsewhere.
-    await mkdir(appRoot, { recursive: true, mode: 0o700 });
-    await assertSecureStateDirectory(appRoot);
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    await assertSecureStateDirectory(root);
-    await chmod(appRoot, 0o700);
-    await chmod(root, 0o700);
-    return root;
+    const createdMs = budget?.createdMs ?? Date.now();
+    const run = await createRunDirectory({
+      kind: budget?.kind ?? "claude",
+      createdMs,
+      deadlineMs: budget?.deadlineMs ?? createdMs + DEFAULT_CLAUDE_MAX_TIMEOUT_MS + 10 * 60 * 1000,
+      legMaxMs: budget?.legMaxMs ?? DEFAULT_CLAUDE_MAX_TIMEOUT_MS,
+    });
+    return {
+      path: run.cwd,
+      cleanup: run.cleanup,
+      observableCleanupPath: run.path,
+    };
   } catch (error) {
-    throw new WuxReviewError(
-      `codex reviewer: cannot create secure per-leg CODEX_HOME root: ${errorDetail(error)}`,
-    );
-  }
-}
-
-async function assertSecureStateDirectory(path: string): Promise<void> {
-  const metadata = await lstat(path);
-  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  if (
-    !metadata.isDirectory()
-    || metadata.isSymbolicLink()
-    || (uid !== undefined && metadata.uid !== uid)
-  ) {
-    throw new Error("state root is not a real directory owned by the current user");
-  }
-}
-
-async function pruneStaleCodexHomes(root: string): Promise<void> {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  try {
-    const entries = await readdir(root, { withFileTypes: true });
-    await Promise.all(entries.map(async (entry) => {
-      if (!entry.name.startsWith("wuxr-codex-home-")) return;
-      const path = join(root, entry.name);
-      const metadata = await lstat(path);
-      // lstat is intentional: symlinks are never followed or removed here.
-      if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.mtimeMs >= cutoff) return;
-      await rm(path, { recursive: true, force: true });
-    }));
-  } catch (error) {
-    // Pruning is hygiene only. A valid new isolated home is more important than
-    // deleting an old one, so failure remains visible but never blocks a leg.
-    process.stderr.write(`codex reviewer: stale-home pruning failed: ${oneLine(errorDetail(error))}\n`);
-  }
-}
-
-export async function prepareReviewerCwd(parentDir = tmpdir()): Promise<ReviewerCwd> {
-  let createdPath: string | undefined;
-  try {
-    createdPath = await mkdtemp(join(parentDir, "wuxr-reviewer-cwd-"));
-    await chmod(createdPath, 0o700);
-  } catch (error) {
-    if (createdPath !== undefined) {
-      await rm(createdPath, { recursive: true, force: true }).catch(() => undefined);
-    }
     throw new WuxReviewError(
       `reviewer: cannot create secure per-leg working directory: ${errorDetail(error)}`,
     );
   }
-  const path = createdPath;
-  return {
-    path,
-    cleanup: async () => {
-      await rm(path, { recursive: true, force: true }).catch(() => undefined);
-    },
-    observableCleanupPath: path,
-  };
 }
 
 // Execute a leg's unchanged argv through the strict observable adapter when
@@ -891,7 +845,7 @@ async function execLeg(
         cleanupDir: input.cleanupDir,
         recordPrepared: recordPreparedChild === undefined
           ? undefined
-          : () => recordPreparedChild(childName, attempt),
+          : (cleanupDir) => recordPreparedChild(childName, attempt, cleanupDir),
         recordEvidence: input.recordEvidence ?? opts.recordEvidence,
         signal: opts.signal,
       },
@@ -972,7 +926,13 @@ export function createClaudeHeadlessBackend(overrides: Partial<HeadlessBackendDe
         deps.claudeMaxTimeoutMs,
       );
       deps.warn(timeoutStartMessage("claude", timeoutMs, promptBytes));
-      reviewerCwd = await deps.prepareReviewerCwd();
+      const createdMs = Date.now();
+      reviewerCwd = await deps.prepareReviewerCwd(undefined, {
+        kind: "claude",
+        createdMs,
+        deadlineMs: createdMs + timeoutMs + 10 * 60 * 1000,
+        legMaxMs: timeoutMs,
+      });
       let result: HeadlessRunResult;
       try {
         result = await execLeg(deps, opts, {
@@ -1146,13 +1106,32 @@ export function createCodexHeadlessBackend(overrides: Partial<HeadlessBackendDep
       // path; the false branch is retained only for injected unit-test seams and
       // explicitly ignores shared user config.
       if (isolate) {
-        home = await deps.prepareCodexHome();
+        const createdMs = Date.now();
+        const backoffMs = deps.codexRetryBaseMs * (2 ** maxRetries - 1);
+        home = await deps.prepareCodexHome({
+          kind: "codex",
+          createdMs,
+          deadlineMs: createdMs + (maxRetries + 1) * timeoutMs + backoffMs + 10 * 60 * 1000,
+          legMaxMs: timeoutMs,
+        });
         for (const diagnostic of home.diagnostics ?? []) deps.warn(diagnostic);
       }
       try {
-        // Nest Codex's private cwd inside its throwaway home so observable mode
-        // can transfer one cleanup root to the wrapper on parent interruption.
-        reviewerCwd = await deps.prepareReviewerCwd(home?.observableCleanupPath);
+        // The production home and cwd are siblings inside one owned run. The
+        // fallback remains an injected unit-test seam for callers that provide
+        // a synthetic home without a run layout.
+        reviewerCwd = home?.reviewerCwdPath === undefined
+          ? await deps.prepareReviewerCwd(undefined, {
+              kind: "codex",
+              createdMs: Date.now(),
+              deadlineMs: Date.now() + timeoutMs + 10 * 60 * 1000,
+              legMaxMs: timeoutMs,
+            })
+          : {
+              path: home.reviewerCwdPath,
+              cleanup: async () => undefined,
+              observableCleanupPath: home.observableCleanupPath,
+            };
         // `--ephemeral`: never persist this one-shot review's session to disk.
         // Pure upside — it drops the per-event session-rollout writes that
         // concurrent legs would otherwise serialize on in a shared CODEX_HOME.

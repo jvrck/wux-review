@@ -592,6 +592,7 @@ describe("runReview", () => {
             "codex",
             `${baseChild}-a2`,
             2,
+            "/state/wux-review/runs/r-kf12oi-ABC123",
           );
           throw new Error("simulated crash before Wux retry launch");
         },
@@ -600,6 +601,10 @@ describe("runReview", () => {
     expect(current?.prepared).toEqual({
       claude: ["wuxr-prepretry-r1-xexec1-claude"],
       codex: [baseChild, `${baseChild}-a2`],
+    });
+    expect(current?.preparedCleanup).toEqual({
+      claude: {},
+      codex: { [`${baseChild}-a2`]: "/state/wux-review/runs/r-kf12oi-ABC123" },
     });
   });
 

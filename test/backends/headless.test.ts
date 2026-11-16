@@ -1304,6 +1304,38 @@ describe("observable Wux adapter", () => {
     }
   });
 
+  test("T-wrapper-mv-trash: the EXIT trap moves an owned run through trash before removal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-trash-"));
+    try {
+      const runs = join(dir, "state", "wux-review", "runs");
+      const trash = join(runs, ".trash");
+      const cleanupDir = join(runs, "r-kf12oi-ABC123");
+      const argsPath = join(dir, "args");
+      const readyPath = join(dir, "ready");
+      const scriptPath = join(dir, "wrap.sh");
+      await mkdir(trash, { recursive: true });
+      await mkdir(cleanupDir);
+      await Bun.write(join(cleanupDir, "state"), "throwaway");
+      await Bun.write(argsPath, "/usr/bin/true\0");
+      await Bun.write(readyPath, "ready\n");
+      await Bun.write(scriptPath, buildObservableWrapperScript({
+        argsPath,
+        stdoutPath: join(dir, "out"),
+        stderrPath: join(dir, "err"),
+        donePath: join(dir, "done"),
+        readyPath,
+        cleanupDir,
+        cleanupTrashDir: trash,
+      }));
+
+      expect(await Bun.spawn(["/bin/bash", scriptPath]).exited).toBe(0);
+      expect(await Bun.file(cleanupDir).exists()).toBe(false);
+      expect((await readdir(trash)).length).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a normally-exiting observable attempt leaves shared retry inputs for its live parent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-retry-cleanup-"));
     try {
@@ -2345,8 +2377,8 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     process.env.XDG_STATE_HOME = state;
     try {
       const home = await prepareIsolatedCodexHome();
-      const root = join(state, "wux-review", "codex-homes");
-      expect(home.env.CODEX_HOME).toStartWith(`${root}/wuxr-codex-home-`);
+      const root = join(state, "wux-review", "runs");
+      expect(home.env.CODEX_HOME).toMatch(new RegExp(`^${root}/r-[0-9a-z]+-[A-Za-z0-9]{6}/home$`));
       expect((await stat(root)).mode & 0o777).toBe(0o700);
       expect((await stat(home.env.CODEX_HOME!)).mode & 0o777).toBe(0o700);
       await home.cleanup();
@@ -2391,7 +2423,7 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     await symlink(target, join(state, "wux-review"));
     process.env.XDG_STATE_HOME = state;
     try {
-      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("cannot create secure per-leg CODEX_HOME");
     } finally {
       if (prior === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = prior;
@@ -2400,15 +2432,15 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     }
   });
 
-  test("refuses a symlinked codex-homes root", async () => {
+  test("refuses a symlinked runs root", async () => {
     const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
     const target = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
     const prior = process.env.XDG_STATE_HOME;
     await mkdir(join(state, "wux-review"), { recursive: true });
-    await symlink(target, join(state, "wux-review", "codex-homes"));
+    await symlink(target, join(state, "wux-review", "runs"));
     process.env.XDG_STATE_HOME = state;
     try {
-      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("cannot create secure per-leg CODEX_HOME");
     } finally {
       if (prior === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = prior;
@@ -2417,7 +2449,7 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     }
   });
 
-  test("prunes only old real own-prefix homes", async () => {
+  test("does not prune legacy homes during PR1 run preparation", async () => {
     const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
     const prior = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = state;
@@ -2430,12 +2462,10 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     try {
       await mkdir(root, { recursive: true });
       await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(other)]);
-      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
-      await Promise.all([utimes(oldHome, old, old), utimes(other, old, old)]);
       await symlink(outside, link);
       const home = await prepareIsolatedCodexHome();
       await home.cleanup();
-      expect(await Bun.file(oldHome).exists()).toBe(false);
+      expect((await lstat(oldHome)).isDirectory()).toBe(true);
       expect((await lstat(youngHome)).isDirectory()).toBe(true);
       expect((await lstat(other)).isDirectory()).toBe(true);
       expect((await lstat(link)).isSymbolicLink()).toBe(true);

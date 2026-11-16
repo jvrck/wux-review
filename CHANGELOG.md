@@ -11,6 +11,13 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **Private reviewer run layout.** Each reviewer leg now creates one private,
+  mode-`0700` run directory under the state home. Its working directory (and
+  Codex home, when used) live inside that run, which is removed only through
+  the owned cleanup path.
+
 ## 2026.11.17
 
 ### Fixed

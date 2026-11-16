@@ -6,15 +6,20 @@ The reviewer execution boundary, auth-preserving containment decisions, and
 adversarial verification are documented in the
 [reviewer threat model](./reviewer-threat-model.md).
 
-## Codex reviewer state
+## Reviewer run state
 
-Each Codex review leg gets a fresh mode-`0700` `CODEX_HOME` under
-`${XDG_STATE_HOME:-~/.local/state}/wux-review/codex-homes/`; relative XDG state
-paths are ignored. The root is verified as a real, current-user-owned directory
-and is mode `0700`; homes are removed at normal completion and stale real home
-directories older than 24 hours are pruned best-effort at the next Codex-leg
-start. This location is outside the system temporary directory so Codex 0.162+
-can create its read-only sandbox helpers.
+Each reviewer leg gets a fresh mode-`0700` directory under
+`${XDG_STATE_HOME:-~/.local/state}/wux-review/runs/`. The parent writes its
+small `run.json` record before starting the child. Claude uses `run/cwd`; Codex
+uses both `run/cwd` and `run/home` as its throwaway `CODEX_HOME`. The
+`wux-review`, `runs`, and `runs/.trash` directories are verified as real,
+current-user-owned mode-`0700` directories before use. Relative XDG state paths
+are ignored.
+
+Normal completion removes only the owned run directory. The removal path checks
+its exact run or legacy cleanup shape, does not follow symlinks, and moves
+state-root entries through `runs/.trash` before recursive removal. No automatic
+run pruning is performed by this release.
 
 Codex evidence is fail-closed in both direct and observable execution. An
 `error` or `turn.failed` machine event, a sandbox-start failure, an unclassified

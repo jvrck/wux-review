@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   createRunDirectory,
   readRunJson,
+  removeOwnedDir,
   validateCleanupDirectory,
 } from "../../src/backends/run-layout";
 
@@ -87,5 +88,24 @@ describe("PR1 run layout", () => {
     ]) {
       expect(validateCleanupDirectory(path, { stateDir, tempDir: tmpdir() })).toBe(false);
     }
+  });
+
+  test("T-symlink-inside-run: removal unlinks links without touching their target", async () => {
+    const stateDir = await stateRoot();
+    const outside = join(stateDir, "outside");
+    const run = await createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    });
+    await writeFile(outside, "keep");
+    await symlink(outside, join(run.cwd, "outside-link"));
+
+    await removeOwnedDir(run.path, { stateDir, tempDir: tmpdir() });
+
+    expect(await Bun.file(run.path).exists()).toBe(false);
+    expect(await Bun.file(outside).text()).toBe("keep");
   });
 });

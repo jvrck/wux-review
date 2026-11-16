@@ -223,7 +223,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
           })
         : undefined,
       recordObservablePreparedChild: observable
-        ? (reviewer, childName, attempt) => serializeRecovery(async () => {
+        ? (reviewer, childName, attempt, cleanupDir) => serializeRecovery(async () => {
             if (recoveryRecord === undefined) {
               throw new WuxReviewError(
                 `${childName} observable reviewer leg: recovery state was not prepared`,
@@ -235,6 +235,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
               childName,
               attempt,
               new Date().toISOString(),
+              cleanupDir,
             );
             await roundStore.save(recoveryRecord);
           })

@@ -43,9 +43,9 @@ eval sweep, a batch of PRs) without a concurrency cap. The Codex leg is
 hardened for transient load failures:
 
 - **Contained reviewer processes.** Each leg runs in its own freshly created
-  mode-0700 working directory, never the reviewed repository or a shared,
-  attacker-plantable temp path; the complete diff is already in the supplied
-  prompt. Claude uses safe mode, an empty built-in tool set, strict empty MCP
+  mode-0700 directory under `${XDG_STATE_HOME:-~/.local/state}/wux-review/runs/`,
+  never the reviewed repository or a shared, attacker-plantable temp path; the
+  complete diff is already in the supplied prompt. Claude uses safe mode, an empty built-in tool set, strict empty MCP
   configuration, disabled skills, and no session persistence while retaining
   OAuth/keychain or API-key auth. Codex keeps `-s read-only`, `--ephemeral`, and
   `--ignore-rules`.
