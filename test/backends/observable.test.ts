@@ -49,6 +49,22 @@ test("validateObservableCleanup accepts only expected Codex home shapes", () => 
   }
 });
 
+test("T-adapter-rm-nonrecursive: the default adapter refuses to remove a directory", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wuxr-adapter-rm-"));
+  try {
+    const deps = defaultObservableDeps(async () => ({
+      code: 0,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+    }));
+    await expect(deps.rm(dir)).rejects.toThrow();
+    expect(await Bun.file(dir).exists()).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 interface HarnessOptions {
   existing?: string[];
   statusJson?: string;

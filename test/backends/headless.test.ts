@@ -2695,6 +2695,23 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
 });
 
 describe("prepareReviewerCwd (real fs)", () => {
+  test("T-run-layout-claude: creates the Claude cwd in the private state run root", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-run-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const cwd = await prepareReviewerCwd();
+      expect(cwd.path).toMatch(new RegExp(
+        `^${join(state, "wux-review", "runs")}/r-[0-9a-z]+-[A-Za-z0-9]{6}/cwd$`,
+      ));
+      await cwd.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
   test("creates a unique mode-0700 directory per leg and removes each on teardown", async () => {
     const first = await prepareReviewerCwd();
     const second = await prepareReviewerCwd();
