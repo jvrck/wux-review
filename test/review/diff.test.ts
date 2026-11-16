@@ -264,13 +264,15 @@ describe("getDiff", () => {
   test("partial clones on Git 2.45 run every fallback command with --no-lazy-fetch", async () => {
     const { calls, run } = partialCloneFallbackRun("2.45.0");
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
-    expect(calls.slice(4)).toEqual([
+    const traversal = calls.slice(4);
+    expect(traversal.every((command) => command[0] === "git" && command[1] === "--no-lazy-fetch")).toBe(true);
+    expect(traversal.map((command) => command.join(" ")).sort()).toEqual([
       ["git", "--no-lazy-fetch", "cat-file", "-e", `${PR_REFS.baseRefOid}^{commit}`],
       ["git", "--no-lazy-fetch", "cat-file", "-e", `${PR_REFS.headRefOid}^{commit}`],
       ["git", "--no-lazy-fetch", "merge-base", PR_REFS.baseRefOid, PR_REFS.headRefOid],
       ["git", "--no-lazy-fetch", "-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "-z", `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`],
       ["git", "--no-lazy-fetch", "-c", "core.quotePath=false", "diff", `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`],
-    ]);
+    ].map((command) => command.join(" ")).sort());
   });
 
   test("a partial clone on Git 2.44 fails before fallback traversal", async () => {
