@@ -77,6 +77,8 @@ interface PrRefs {
   baseRefName: string;
 }
 
+const NO_LAZY_GIT = ["env", "GIT_NO_LAZY_FETCH=1", "git"];
+
 function isPrDiffTooLarge(stderr: string): boolean {
   const detail = stderr.toLowerCase();
   return (
@@ -89,24 +91,19 @@ function isPrDiffTooLarge(stderr: string): boolean {
 async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   const refs = await getPrRefs(pr, run);
   for (const sha of [refs.baseRefOid, refs.headRefOid]) {
-    const object = await run(["git", "cat-file", "-e", `${sha}^{commit}`]);
-    if (object.code !== 0) {
-      throw new WuxReviewError(
-        `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`,
-      );
-    }
+    await requireLocalObject(pr, refs, sha, `${sha}^{commit}`, run);
   }
 
-  const mergeBaseCommand = ["git", "merge-base", refs.baseRefOid, refs.headRefOid];
-  const mergeBase = await run(mergeBaseCommand);
+  const mergeBaseCommand = ["merge-base", refs.baseRefOid, refs.headRefOid];
+  const mergeBase = await noLazyGit(run, mergeBaseCommand);
   if (mergeBase.code !== 0) {
     if (mergeBase.code !== 1) {
-      throw captureError(mergeBaseCommand, mergeBase.stderr, mergeBase.code);
+      throw captureNoLazyError(mergeBaseCommand, mergeBase.stderr, mergeBase.code);
     }
-    const shallowCommand = ["git", "rev-parse", "--is-shallow-repository"];
-    const shallow = await run(shallowCommand);
+    const shallowCommand = ["rev-parse", "--is-shallow-repository"];
+    const shallow = await noLazyGit(run, shallowCommand);
     if (shallow.code !== 0) {
-      throw captureError(shallowCommand, shallow.stderr, shallow.code);
+      throw captureNoLazyError(shallowCommand, shallow.stderr, shallow.code);
     }
     if (shallow.stdout.trim() === "true") {
       throw new WuxReviewError(
@@ -119,10 +116,60 @@ async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   }
 
   const range = `${refs.baseRefOid}...${refs.headRefOid}`;
+  await requireLocalRangeObjects(pr, refs, range, run);
   process.stderr.write(
-    `wux-review: PR #${pr} exceeds GitHub's diff file limit; reviewing ${range} from local git\n`,
+    `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
-  return finalize(await gitDiff(run, [range]), await gitNames(run, [range]));
+  return finalize(await noLazyGitDiff(run, [range]), await noLazyGitNames(run, [range]));
+}
+
+async function requireLocalRangeObjects(pr: number, refs: PrRefs, range: string, run: Run): Promise<void> {
+  const raw = await noLazyGitOut(run, ["diff", "--no-ext-diff", "--no-renames", "--raw", "-z", range]);
+  const objectIds = new Set<string>();
+  for (const entry of raw.split("\0")) {
+    const match = /^:[0-7]+ [0-7]+ ([0-9a-f]+) ([0-9a-f]+) /.exec(entry);
+    if (match) {
+      objectIds.add(match[1]!);
+      objectIds.add(match[2]!);
+    }
+  }
+  for (const objectId of objectIds) {
+    if (!/^0+$/.test(objectId)) {
+      await requireLocalObject(pr, refs, objectId, objectId, run, range);
+    }
+  }
+}
+
+async function requireLocalObject(
+  pr: number,
+  refs: PrRefs,
+  objectId: string,
+  objectExpression: string,
+  run: Run,
+  range?: string,
+): Promise<void> {
+  const command = ["cat-file", "-e", objectExpression];
+  const object = await noLazyGit(run, command);
+  if (object.code === 0) return;
+  if (isMissingObject(object.stderr, objectExpression)) {
+    const subject = range ? `objects required for ${range}` : objectId;
+    throw new WuxReviewError(
+      `PR #${pr} is too large for gh pr diff and ${subject} isn't available locally; ${fetchHint(pr, refs)}`,
+    );
+  }
+  throw captureNoLazyError(command, object.stderr, object.code);
+}
+
+function isMissingObject(stderr: string, objectExpression: string): boolean {
+  const detail = stderr.toLowerCase();
+  return (
+    detail.includes(`not a valid object name ${objectExpression.toLowerCase()}`) ||
+    detail.includes(`could not fetch ${objectExpression.toLowerCase()} from promisor remote`)
+  );
+}
+
+function fetchHint(pr: number, refs: PrRefs): string {
+  return `run: git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`;
 }
 
 async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
@@ -169,6 +216,10 @@ async function gitDiff(run: Run, args: string[]): Promise<string> {
   return gitOut(run, ["diff", ...args]);
 }
 
+async function noLazyGitDiff(run: Run, args: string[]): Promise<string> {
+  return noLazyGitOut(run, ["-c", "core.quotePath=false", "diff", ...args]);
+}
+
 // Changed-file list, NUL-separated (`-z`) with `core.quotePath=false`, so paths
 // containing spaces, newlines, or non-ASCII bytes survive intact rather than
 // being C-quoted or split on the wrong boundary.
@@ -176,8 +227,24 @@ async function gitNames(run: Run, args: string[]): Promise<string[]> {
   return splitNul(await gitOut(run, ["diff", "-z", "--name-only", ...args]));
 }
 
+async function noLazyGitNames(run: Run, args: string[]): Promise<string[]> {
+  return splitNul(await noLazyGitOut(run, ["-c", "core.quotePath=false", "diff", "-z", "--name-only", ...args]));
+}
+
 async function gitOut(run: Run, args: string[]): Promise<string> {
   return capture(run, ["git", "-c", "core.quotePath=false", ...args]);
+}
+
+async function noLazyGitOut(run: Run, args: string[]): Promise<string> {
+  const result = await noLazyGit(run, args);
+  if (result.code !== 0) {
+    throw captureNoLazyError(args, result.stderr, result.code);
+  }
+  return result.stdout;
+}
+
+async function noLazyGit(run: Run, args: string[]): Promise<Awaited<ReturnType<Run>>> {
+  return run([...NO_LAZY_GIT, ...args]);
 }
 
 // `git diff --no-index` exits 1 when the inputs differ (which is always, here:
@@ -203,6 +270,10 @@ async function capture(run: Run, cmd: string[]): Promise<string> {
 function captureError(cmd: string[], stderr: string, code: number): WuxReviewError {
   const detail = stderr.trim() || `exit ${code}`;
   return new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
+}
+
+function captureNoLazyError(args: string[], stderr: string, code: number): WuxReviewError {
+  return captureError(["git", ...args], stderr, code);
 }
 
 function splitNul(out: string): string[] {

@@ -14,10 +14,10 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 ### Fixed
 
 - **Large-PR local fallback.** When GitHub declines a pull-request diff because
-  it exceeds the file limit, wux-review now reviews the equivalent local
+  it exceeds the diff size limit, wux-review now reviews the equivalent local
   `base...head` range if both commits and their common history are already
   available. It never fetches automatically and prints a fetch command when a
-  required commit or shallow history is unavailable; unrelated histories fail
+  required object or shallow history is unavailable; unrelated histories fail
   clearly instead of producing a partial review.
 
 ## 2026.10.31
