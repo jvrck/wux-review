@@ -1800,10 +1800,11 @@ export async function discardPreparedObservableLeg(
     ...overrides,
   };
   const base = tempPathBase(deps.tmpDir, childName);
-  const cleanupPaths = preparedTransientPathsForBase(
+  const cleanupFiles = preparedTransientPathsForBase(
     base,
     reviewer === "codex" && observableRetryAttempt(childName) === undefined,
   );
+  let cleanupDirectory: string | undefined;
   let cleanupMetadataError: unknown;
   const rawCleanup = await deps.readFile(
     `${base}-observable-prepared-cleanup.json`,
@@ -1821,10 +1822,8 @@ export async function discardPreparedObservableLeg(
         parsed.data.cleanupDir,
         deps.tmpDir,
       );
-      cleanupPaths.push(...parsed.data.cleanupFiles);
-      if (parsed.data.cleanupDir !== undefined) {
-        cleanupPaths.push(parsed.data.cleanupDir);
-      }
+      cleanupFiles.push(...parsed.data.cleanupFiles);
+      cleanupDirectory = parsed.data.cleanupDir;
     } catch (error) {
       cleanupMetadataError = error instanceof WuxReviewError
         ? error
@@ -1842,7 +1841,7 @@ export async function discardPreparedObservableLeg(
   // survive: it may be the only record of an isolated home outside this base.
   await stopOwnedChild({ deps, childName });
   if (cleanupMetadataError !== undefined) throw cleanupMetadataError;
-  await cleanupTransient(deps, [...new Set(cleanupPaths)]);
+  await cleanupTransient(deps, [...new Set(cleanupFiles)], cleanupDirectory);
 }
 
 function assertReconcilableIdentity(
@@ -2415,15 +2414,14 @@ function isWuxRunAlreadyGone(detail: string): boolean {
 
 async function cleanupTransient(
   deps: ObservableAdapterDeps,
-  paths: string[],
+  files: string[],
+  directory?: string,
 ): Promise<void> {
   try {
-    await Promise.all(paths.map(async (path) => {
-      if (validateCleanupDirectory(path)) {
-        await removeOwnedDir(path);
-      }
-      await deps.rm(path);
-    }));
+    await Promise.all([
+      ...files.map((path) => deps.rm(path)),
+      ...(directory === undefined ? [] : [removeOwnedDir(directory)]),
+    ]);
   } catch (error) {
     throw new WuxReviewError(`observable transient cleanup failed: ${errorDetail(error)}`);
   }

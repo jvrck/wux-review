@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -134,15 +135,43 @@ describe("PR1 run layout", () => {
   test("T-root-foreign-entries: foreign entries stay untouched and warn once per pass", async () => {
     const stateDir = await stateRoot();
     const root = await ensureRunsRoot({ stateDir });
-    const foreign = join(root, "r-bad");
-    await writeFile(foreign, "foreign");
+    const file = join(root, "foreign-file");
+    const fifo = join(root, "foreign-fifo");
+    const socket = join(root, "foreign.sock");
+    const target = join(stateDir, "symlink-target");
+    const link = join(root, "foreign-link");
+    const wuxrDirectory = join(root, "wuxr-foreign");
+    const malformedRun = join(root, "r-bad");
+    await writeFile(file, "foreign");
+    expect(await Bun.spawn(["/usr/bin/mkfifo", fifo]).exited).toBe(0);
+    await writeFile(target, "target");
+    await symlink(target, link);
+    await mkdir(wuxrDirectory);
+    await mkdir(malformedRun);
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socket, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
     const write = spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       await ensureRunsRoot({ stateDir });
-      expect(await Bun.file(foreign).text()).toBe("foreign");
+      expect((await lstat(file)).isFile()).toBe(true);
+      expect((await lstat(fifo)).isFIFO()).toBe(true);
+      expect((await lstat(socket)).isSocket()).toBe(true);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      expect(await Bun.file(target).text()).toBe("target");
+      expect((await lstat(wuxrDirectory)).isDirectory()).toBe(true);
+      expect((await lstat(malformedRun)).isDirectory()).toBe(true);
       expect(write).toHaveBeenCalledTimes(1);
+      await ensureRunsRoot({ stateDir });
+      expect(write).toHaveBeenCalledTimes(2);
     } finally {
       write.mockRestore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

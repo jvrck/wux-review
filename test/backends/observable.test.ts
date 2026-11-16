@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { describe, expect, spyOn, test } from "bun:test";
+import { lstat, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -64,6 +65,108 @@ test("T-adapter-rm-nonrecursive: the default adapter refuses to remove a directo
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("T-prepared-cleanup-nondirectories: prepared cleanup keeps special entries at accepted paths", async () => {
+  const adapterTmpDir = await mkdtemp(join(tmpdir(), "wuxr-prepared-cleanup-"));
+  const outside = await mkdtemp(join(tmpdir(), "wuxr-prepared-outside-"));
+  const cleanupPaths: string[] = [];
+  const servers: ReturnType<typeof createServer>[] = [];
+  try {
+    const file = await specialCleanupPath(async (path) => {
+      await writeFile(path, "foreign file");
+    });
+    const fifo = await specialCleanupPath(async (path) => {
+      expect(await Bun.spawn(["/usr/bin/mkfifo", path]).exited).toBe(0);
+    });
+    const socket = await specialCleanupPath(async (path) => {
+      const server = createServer();
+      servers.push(server);
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(path, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+    });
+    const outsideFile = join(outside, "outside-file");
+    const outsideDirectory = join(outside, "outside-directory");
+    await writeFile(outsideFile, "keep");
+    await mkdir(outsideDirectory);
+    const fileLink = await specialCleanupPath((path) => symlink(outsideFile, path));
+    const directoryLink = await specialCleanupPath((path) => symlink(outsideDirectory, path));
+    cleanupPaths.push(file, fifo, socket, fileLink, directoryLink);
+
+    const warning = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      for (const [index, cleanupDir] of cleanupPaths.entries()) {
+        const childName = `obs-review-r2-codex-a${index + 2}`;
+        const base = join(adapterTmpDir, childName);
+        const preparedPath = `${base}-observable-prepared-cleanup.json`;
+        const files = new Map<string, string>([
+          [preparedPath, `${JSON.stringify({
+            version: 1,
+            childName,
+            cleanupFiles: [],
+            cleanupDir,
+          })}\n`],
+        ]);
+        await discardPreparedObservableLeg(childName, "codex", {
+          tmpDir: adapterTmpDir,
+          readFile: async (path) => files.get(path),
+          rm: async (path) => {
+            if (path === cleanupDir) await rm(path, { force: true });
+            else files.delete(path);
+          },
+          run: async (cmd) => cmd.includes("status")
+            ? { code: 0, stdout: "[]", stderr: "", timedOut: false }
+            : { code: 1, stdout: "", stderr: `run not found: ${childName}`, timedOut: false },
+        });
+        expect(await lstat(cleanupDir)).toBeDefined();
+      }
+      const ownedDirectory = await mkdtemp(join(tmpdir(), "wuxr-reviewer-cwd-"));
+      const childName = "obs-review-r2-codex-a7";
+      const base = join(adapterTmpDir, childName);
+      const preparedPath = `${base}-observable-prepared-cleanup.json`;
+      const files = new Map<string, string>([
+        [preparedPath, `${JSON.stringify({
+          version: 1,
+          childName,
+          cleanupFiles: [],
+          cleanupDir: ownedDirectory,
+        })}\n`],
+      ]);
+      await discardPreparedObservableLeg(childName, "codex", {
+        tmpDir: adapterTmpDir,
+        readFile: async (path) => files.get(path),
+        rm: async (path) => void files.delete(path),
+        run: async (cmd) => cmd.includes("status")
+          ? { code: 0, stdout: "[]", stderr: "", timedOut: false }
+          : { code: 1, stdout: "", stderr: `run not found: ${childName}`, timedOut: false },
+      });
+      expect(await Bun.file(ownedDirectory).exists()).toBe(false);
+      expect(await Bun.file(outsideFile).text()).toBe("keep");
+      expect((await lstat(outsideDirectory)).isDirectory()).toBe(true);
+      expect(warning).toHaveBeenCalledTimes(cleanupPaths.length);
+    } finally {
+      warning.mockRestore();
+    }
+  } finally {
+    await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+    await Promise.all(cleanupPaths.map((path) => rm(path, { force: true })));
+    await rm(adapterTmpDir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+async function specialCleanupPath(
+  create: (path: string) => Promise<void>,
+): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), "wuxr-reviewer-cwd-"));
+  await rm(path, { recursive: true, force: true });
+  await create(path);
+  return path;
+}
 
 interface HarnessOptions {
   existing?: string[];

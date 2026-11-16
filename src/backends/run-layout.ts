@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -223,12 +223,11 @@ export async function removeOwnedDir(path: string, options: CleanupPathOptions =
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (metadata.isSymbolicLink()) {
-    await unlink(path);
+  const uid = currentUid();
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (uid !== undefined && metadata.uid !== uid)) {
+    process.stderr.write(`wux-review: leaving unowned cleanup path ${JSON.stringify(path)}\n`);
     return;
   }
-  const uid = currentUid();
-  if (!metadata.isDirectory() || (uid !== undefined && metadata.uid !== uid)) return;
 
   const temporaryRoot = resolve(options.tempDir ?? tmpdir());
   if (dirname(path) === temporaryRoot) {
