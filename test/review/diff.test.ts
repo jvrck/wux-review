@@ -67,6 +67,66 @@ describe("getDiff", () => {
     expect(stderr).toContain(`reviewing ${range} from local git`);
   });
 
+  test("other gh PR diff failures retain their original error", async () => {
+    const run = mockRun({ "gh pr diff 42": fail("authentication failed", 1) });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "gh pr diff 42: authentication failed",
+    );
+  });
+
+  test("an unrelated HTTP 406 does not trigger a local fallback", async () => {
+    const run = mockRun({ "gh pr diff 42": fail("HTTP 406: unsupported media type", 1) });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "gh pr diff 42: HTTP 406: unsupported media type",
+    );
+  });
+
+  test("missing local PR commits give the required fetch command without fetching", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("missing", 1),
+    });
+
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "PR #42 is too large for gh pr diff and 0123456789abcdef0123456789abcdef01234567 isn't available locally; run: git fetch origin 'main' 'pull/42/head'",
+    );
+  });
+
+  test("fetch hints quote shell-sensitive base branch names", async () => {
+    const refs = { ...PR_REFS, baseRefName: "topic;$(echo unsafe)'quote" };
+    const run = mockRun({
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(refs)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("missing", 1),
+    });
+
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "git fetch origin 'topic;$(echo unsafe)'\\''quote' 'pull/42/head'",
+    );
+  });
+
+  test("unavailable merge history gives a runnable shallow-clone hint or an unrelated-history error", async () => {
+    const common = {
+      "gh pr diff 42": fail("too_large", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("", 1),
+    };
+    const shallow = mockRun({
+      ...common,
+      "git rev-parse --is-shallow-repository": ok("true\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, shallow)).rejects.toThrow("run: git fetch --unshallow");
+
+    const unrelated = mockRun({
+      ...common,
+      "git rev-parse --is-shallow-repository": ok("false\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, unrelated)).rejects.toThrow("have unrelated histories locally");
+  });
+
   test("range target uses git diff with stable path encoding (-z, quotePath off)", async () => {
     const run = mockRun({
       "git -c core.quotePath=false diff main...HEAD": ok(SAMPLE_DIFF),
