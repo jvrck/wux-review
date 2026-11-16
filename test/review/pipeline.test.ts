@@ -556,6 +556,7 @@ describe("runReview", () => {
 
   test("pipeline journals an exact Codex retry before its Wux launch", async () => {
     let current: ObservableRoundRecord | undefined;
+    const claudeChild = "wuxr-prepretry-r1-xexec1-claude";
     const baseChild = "wuxr-prepretry-r1-xexec1-codex";
     await expect(runReview(
       { session: "prepretry", direct: false },
@@ -585,8 +586,24 @@ describe("runReview", () => {
             reviewId: "prepretry",
             round: 1,
             executionId: "exec1",
-            claudeChildName: "wuxr-prepretry-r1-xexec1-claude",
+            claudeChildName: claudeChild,
             codexChildName: baseChild,
+          });
+          await options!.recordObservablePreparedChild!(
+            "claude",
+            claudeChild,
+            1,
+            "/state/wux-review/runs/r-kf12oi-CLA123",
+          );
+          await options!.recordObservablePreparedChild!(
+            "codex",
+            baseChild,
+            1,
+            "/state/wux-review/runs/r-kf12oi-COD123",
+          );
+          expect(current?.preparedCleanup).toEqual({
+            claude: { [claudeChild]: "/state/wux-review/runs/r-kf12oi-CLA123" },
+            codex: { [baseChild]: "/state/wux-review/runs/r-kf12oi-COD123" },
           });
           await options!.recordObservablePreparedChild!(
             "codex",
@@ -599,12 +616,15 @@ describe("runReview", () => {
       },
     )).rejects.toThrow("simulated crash before Wux retry launch");
     expect(current?.prepared).toEqual({
-      claude: ["wuxr-prepretry-r1-xexec1-claude"],
+      claude: [claudeChild],
       codex: [baseChild, `${baseChild}-a2`],
     });
     expect(current?.preparedCleanup).toEqual({
-      claude: {},
-      codex: { [`${baseChild}-a2`]: "/state/wux-review/runs/r-kf12oi-ABC123" },
+      claude: { [claudeChild]: "/state/wux-review/runs/r-kf12oi-CLA123" },
+      codex: {
+        [baseChild]: "/state/wux-review/runs/r-kf12oi-COD123",
+        [`${baseChild}-a2`]: "/state/wux-review/runs/r-kf12oi-ABC123",
+      },
     });
   });
 
