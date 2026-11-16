@@ -75,8 +75,9 @@ function git(root: string, args: string[]): string {
   return result.stdout.toString();
 }
 
-function localGitRun(root: string, refs: typeof PR_REFS): Run {
+function localGitRun(root: string, refs: typeof PR_REFS, calls?: string[][]): Run {
   return async (cmd) => {
+    calls?.push(cmd);
     if (cmd.join(" ") === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
     if (cmd.join(" ") === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") {
       return ok(JSON.stringify(refs));
@@ -89,6 +90,46 @@ function localGitRun(root: string, refs: typeof PR_REFS): Run {
     ]);
     return { code, stdout, stderr };
   };
+}
+
+function partialCloneFallbackRun(version: string): { calls: string[][]; run: Run } {
+  const calls: string[][] = [];
+  const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+  return {
+    calls,
+    run: async (cmd) => {
+      calls.push(cmd);
+      const key = cmd.join(" ");
+      if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
+      if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
+      if (key === "git config --get extensions.partialClone") return ok("origin\n");
+      if (key === "git --version") return ok(`git version ${version}\n`);
+      if (key === `git --no-lazy-fetch cat-file -e ${PR_REFS.baseRefOid}^{commit}`) return ok("");
+      if (key === `git --no-lazy-fetch cat-file -e ${PR_REFS.headRefOid}^{commit}`) return ok("");
+      if (key === `git --no-lazy-fetch merge-base ${PR_REFS.baseRefOid} ${PR_REFS.headRefOid}`) {
+        return ok(`${PR_REFS.baseRefOid}\n`);
+      }
+      if (key === `git --no-lazy-fetch -c core.quotePath=false diff --raw --no-abbrev -z ${range}`) {
+        return ok(`:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`);
+      }
+      if (key === `git --no-lazy-fetch -c core.quotePath=false diff ${range}`) return ok(SAMPLE_DIFF);
+      throw new Error(`unexpected command: ${key}`);
+    },
+  };
+}
+
+function missingObjectIds(root: string): string[] {
+  return git(root, ["--no-lazy-fetch", "rev-list", "--objects", "--missing=print", "HEAD"])
+    .split("\n")
+    .filter((line) => line.startsWith("?"))
+    .map((line) => line.slice(1))
+    .sort();
+}
+
+function installedGitAtLeast(major: number, minor: number): boolean {
+  const result = Bun.spawnSync(["git", "--version"], { stdout: "pipe" });
+  const match = /^git version (\d+)\.(\d+)/.exec(result.stdout.toString());
+  return match !== null && (Number(match[1]) > major || (Number(match[1]) === major && Number(match[2]) >= minor));
 }
 
 function largePrFallbackRun(
@@ -220,30 +261,83 @@ describe("getDiff", () => {
     await expect(getDiff({ kind: "pr", pr: 42 }, configFailure)).rejects.toThrow("config read failure");
   });
 
-  test("partial clones fail closed before fallback traversal", async () => {
-    const run = mockRun({
-      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
-      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
-      "git config --get extensions.partialClone": ok("origin\n"),
-    });
-    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "partial clones aren't supported for the large-PR fallback yet",
-    );
+  test("partial clones on Git 2.45 run every fallback command with --no-lazy-fetch", async () => {
+    const { calls, run } = partialCloneFallbackRun("2.45.0");
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
+    const traversal = calls.slice(4);
+    expect(traversal.every((command) => command[0] === "git" && command[1] === "--no-lazy-fetch")).toBe(true);
+    expect(traversal.map((command) => command.join(" ")).sort()).toEqual([
+      ["git", "--no-lazy-fetch", "cat-file", "-e", `${PR_REFS.baseRefOid}^{commit}`],
+      ["git", "--no-lazy-fetch", "cat-file", "-e", `${PR_REFS.headRefOid}^{commit}`],
+      ["git", "--no-lazy-fetch", "merge-base", PR_REFS.baseRefOid, PR_REFS.headRefOid],
+      ["git", "--no-lazy-fetch", "-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "-z", `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`],
+      ["git", "--no-lazy-fetch", "-c", "core.quotePath=false", "diff", `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`],
+    ].map((command) => command.join(" ")).sort());
   });
 
-  test("a promisor remote also fails closed before fallback traversal", async () => {
-    const run = mockRun({
-      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
-      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
-      "git config --get extensions.partialClone": fail("", 1),
-      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": ok("remote.origin.promisor true\n"),
-    });
+  test("a partial clone on Git 2.44 fails before fallback traversal", async () => {
+    const calls: string[][] = [];
+    const run: Run = async (cmd) => {
+      calls.push(cmd);
+      const key = cmd.join(" ");
+      if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
+      if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
+      if (key === "git config --get extensions.partialClone") return fail("", 1);
+      if (key === "git config --type=bool --get-regexp ^remote\\..*\\.promisor$") return ok("remote.origin.promisor true\n");
+      if (key === "git --version") return ok("git version 2.44.4\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      "partial clones aren't supported for the large-PR fallback yet",
+      "this partial clone needs Git 2.45 or newer to avoid lazy fetching",
     );
+    expect(calls).toHaveLength(5);
   });
 
-  test("an explicit false promisor setting permits the local fallback", async () => {
+  // Git v2.45 introduced --no-lazy-fetch; older Git is covered by the mocked
+  // fail-closed test above rather than this real partial-clone integration test.
+  test.skipIf(!installedGitAtLeast(2, 45))("partial clones never lazy-fetch promised objects during fallback", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wuxr-partial-clone-"));
+    const source = join(root, "source");
+    const remote = join(root, "remote.git");
+    try {
+      git(root, ["init", "-q", "-b", "main", source]);
+      git(source, ["config", "user.email", "test@example.com"]);
+      git(source, ["config", "user.name", "Test"]);
+      writeFileSync(join(source, "x.txt"), "base\n");
+      git(source, ["add", "x.txt"]);
+      git(source, ["commit", "-qm", "base"]);
+      const baseRefOid = git(source, ["rev-parse", "HEAD"]).trim();
+      writeFileSync(join(source, "x.txt"), "head\n");
+      git(source, ["commit", "-am", "head", "-q"]);
+      const headRefOid = git(source, ["rev-parse", "HEAD"]).trim();
+      git(root, ["clone", "-q", "--bare", source, remote]);
+      git(remote, ["config", "uploadpack.allowFilter", "true"]);
+      for (const filter of ["blob:none", "tree:0"]) {
+        const clone = join(root, `clone-${filter.replace(":", "-")}`);
+        git(root, ["clone", "-q", `--filter=${filter}`, "--no-checkout", `file://${remote}`, clone]);
+        const before = missingObjectIds(clone);
+        expect(before.length).toBeGreaterThan(0);
+        const calls: string[][] = [];
+        try {
+          await getDiff(
+            { kind: "pr", pr: 42 },
+            localGitRun(clone, { baseRefOid, headRefOid, baseRefName: "main" }, calls),
+          );
+        } catch (error) {
+          expect(error).toBeInstanceOf(Error);
+          expect((error as Error).message).not.toContain("partial clones aren't supported");
+        }
+        const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
+        expect(traversal.length).toBeGreaterThan(0);
+        expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
+        expect(missingObjectIds(clone)).toEqual(before);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a boolean-false promisor setting permits the unchanged non-partial fallback", async () => {
     const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
     const run = mockRun({
       "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
