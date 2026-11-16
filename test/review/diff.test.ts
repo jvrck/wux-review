@@ -125,6 +125,12 @@ describe("getDiff", () => {
       "git rev-parse --is-shallow-repository": ok("false\n"),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, unrelated)).rejects.toThrow("have unrelated histories locally");
+
+    const broken = mockRun({
+      ...common,
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("fatal: corrupt commit graph", 128),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, broken)).rejects.toThrow("fatal: corrupt commit graph");
   });
 
   test("range target uses git diff with stable path encoding (-z, quotePath off)", async () => {

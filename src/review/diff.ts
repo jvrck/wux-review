@@ -97,10 +97,18 @@ async function getLocalPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
     }
   }
 
-  const mergeBase = await run(["git", "merge-base", refs.baseRefOid, refs.headRefOid]);
+  const mergeBaseCommand = ["git", "merge-base", refs.baseRefOid, refs.headRefOid];
+  const mergeBase = await run(mergeBaseCommand);
   if (mergeBase.code !== 0) {
-    const shallow = await run(["git", "rev-parse", "--is-shallow-repository"]);
-    if (shallow.code === 0 && shallow.stdout.trim() === "true") {
+    if (mergeBase.code !== 1) {
+      throw captureError(mergeBaseCommand, mergeBase.stderr, mergeBase.code);
+    }
+    const shallowCommand = ["git", "rev-parse", "--is-shallow-repository"];
+    const shallow = await run(shallowCommand);
+    if (shallow.code !== 0) {
+      throw captureError(shallowCommand, shallow.stderr, shallow.code);
+    }
+    if (shallow.stdout.trim() === "true") {
       throw new WuxReviewError(
         `PR #${pr} is too large for gh pr diff and its merge base isn't available locally; run: git fetch --unshallow`,
       );
