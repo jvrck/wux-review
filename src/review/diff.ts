@@ -114,7 +114,7 @@ async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
     gitRawNames(run, range),
   ]);
   process.stderr.write(
-    `wux-review: PR #${pr} exceeds GitHub's diff file limit; reviewing ${range} from local git\n`,
+    `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
   return finalize(diff, files);
 }
@@ -152,17 +152,25 @@ function isObjectId(value: unknown): value is string {
 }
 
 async function rejectPartialClone(run: Run): Promise<void> {
-  for (const args of [
-    ["config", "--get", "extensions.partialClone"],
-    ["config", "--get-regexp", "^remote\\..*\\.promisor$"],
-  ]) {
-    const result = await run(["git", ...args]);
-    if (result.code === 0 && result.stdout.trim() !== "") {
-      throw new WuxReviewError("partial clones aren't supported for the large-PR fallback yet");
-    }
-    if (result.code !== 0 && result.code !== 1) {
-      throw captureError(["git", ...args], result.stderr, result.code);
-    }
+  const extensionArgs = ["config", "--get", "extensions.partialClone"];
+  const extension = await run(["git", ...extensionArgs]);
+  if (extension.code === 0 && extension.stdout.trim() !== "") {
+    throw new WuxReviewError("partial clones aren't supported for the large-PR fallback yet");
+  }
+  if (extension.code !== 0 && extension.code !== 1) {
+    throw captureError(["git", ...extensionArgs], extension.stderr, extension.code);
+  }
+
+  const promisorArgs = ["config", "--type=bool", "--get-regexp", "^remote\\..*\\.promisor$"];
+  const promisor = await run(["git", ...promisorArgs]);
+  if (
+    promisor.code === 0
+    && promisor.stdout.split("\n").some((line) => line.trim().endsWith(" true"))
+  ) {
+    throw new WuxReviewError("partial clones aren't supported for the large-PR fallback yet");
+  }
+  if (promisor.code !== 0 && promisor.code !== 1) {
+    throw captureError(["git", ...promisorArgs], promisor.stderr, promisor.code);
   }
 }
 
@@ -170,6 +178,9 @@ async function requireLocalCommit(pr: number, refs: PrRefs, sha: string, run: Ru
   const command = ["git", "cat-file", "-e", `${sha}^{commit}`];
   const result = await run(command);
   if (result.code === 0) return;
+  if (!/not a valid object|invalid object|bad object|unknown revision/i.test(result.stderr)) {
+    throw captureError(command, result.stderr, result.code);
+  }
   const fetch = `git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`;
   throw new WuxReviewError(
     `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: ${fetch}`,

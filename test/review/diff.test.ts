@@ -46,19 +46,20 @@ async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stde
   }
 }
 
-function largePrFallbackRun(stderr: string): Run {
+function largePrFallbackRun(
+  stderr: string,
+  raw = `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`,
+): Run {
   const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
   return mockRun({
     "gh pr diff 42": fail(stderr, 1),
     "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
     "git config --get extensions.partialClone": fail("", 1),
-    "git config --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+    "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
     "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
     "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
     "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok(`${PR_REFS.baseRefOid}\n`),
-    [`git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`]: ok(
-      `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`,
-    ),
+    [`git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`]: ok(raw),
     [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
   });
 }
@@ -83,32 +84,27 @@ describe("getDiff", () => {
       const { result, stderr: notice } = await captureStderr(() =>
         getDiff({ kind: "pr", pr: 42 }, largePrFallbackRun(stderr)));
       expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
-      expect(notice).toContain(
-        `reviewing ${PR_REFS.baseRefOid}...${PR_REFS.headRefOid} from local git`,
-      );
+      expect(notice).toContain("exceeds GitHub's diff size limit");
+      expect(notice).toContain(`reviewing ${PR_REFS.baseRefOid}...${PR_REFS.headRefOid} from local git`);
     }
   });
 
   test("large PR fallback parses raw -z entries positionally", async () => {
-    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
-    const run = largePrFallbackRun(DIRECT_TOO_LARGE_RESPONSE);
-    const expected = `git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`;
-    const positional = mockRun({
-      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
-      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
-      "git config --get extensions.partialClone": fail("", 1),
-      "git config --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
-      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
-      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
-      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok(`${PR_REFS.baseRefOid}\n`),
-      [expected]: ok(
-        `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0:100644 100644 ${"c".repeat(40)} ${"d".repeat(40)}.ts\0`,
-      ),
-      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
-    });
-    expect(run).toBeDefined();
-    const { files } = await getDiff({ kind: "pr", pr: 42 }, positional);
-    expect(files).toEqual([`:100644 100644 ${"c".repeat(40)} ${"d".repeat(40)}.ts`]);
+    const raw = [
+      `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} R100`,
+      "before-name.ts",
+      "renamed.ts",
+      `:100644 100644 ${"c".repeat(40)} ${"d".repeat(40)} C100`,
+      "copy-source.ts",
+      "copied.ts",
+      `:100644 100644 ${"e".repeat(40)} ${"f".repeat(40)} M`,
+      "later.ts",
+    ].join("\0") + "\0";
+    const { files } = await getDiff(
+      { kind: "pr", pr: 42 },
+      largePrFallbackRun(DIRECT_TOO_LARGE_RESPONSE, raw),
+    );
+    expect(files).toEqual(["renamed.ts", "copied.ts", "later.ts"]);
   });
 
   test("partial clones fail closed before fallback traversal", async () => {
@@ -127,10 +123,30 @@ describe("getDiff", () => {
       "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
       "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
       "git config --get extensions.partialClone": fail("", 1),
-      "git config --get-regexp ^remote\\..*\\.promisor$": ok("remote.origin.promisor true\n"),
+      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": ok("remote.origin.promisor true\n"),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
       "partial clones aren't supported for the large-PR fallback yet",
+    );
+  });
+
+  test("an explicit false promisor setting permits the local fallback", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    const run = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("", 1),
+      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": ok("remote.origin.promisor false\n"),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok(`${PR_REFS.baseRefOid}\n`),
+      [`git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`]: ok(
+        `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`,
+      ),
+      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual(
+      { diff: SAMPLE_DIFF, files: ["x.ts"] },
     );
   });
 
@@ -139,7 +155,7 @@ describe("getDiff", () => {
       "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
       "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
       "git config --get extensions.partialClone": fail("", 1),
-      "git config --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
       "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("fatal: not a valid object name", 128),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
@@ -147,12 +163,56 @@ describe("getDiff", () => {
     );
   });
 
+  test("other git failures and gh diff errors retain their original detail", async () => {
+    await expect(getDiff({ kind: "pr", pr: 42 }, mockRun({
+      "gh pr diff 42": fail("authentication failed", 1),
+    }))).rejects.toThrow("gh pr diff 42: authentication failed");
+
+    const brokenStore = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("", 1),
+      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("fatal: not a git repository", 128),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, brokenStore)).rejects.toThrow(
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}: fatal: not a git repository",
+    );
+  });
+
+  test("invalid PR metadata and unexpected merge-base failures fail loudly", async () => {
+    const invalid = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok("not JSON"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, invalid)).rejects.toThrow("invalid JSON response");
+
+    const incomplete = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify({ baseRefOid: PR_REFS.baseRefOid })),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, incomplete)).rejects.toThrow(
+      "missing valid base or head commit information",
+    );
+
+    const mergeFailure = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("", 1),
+      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("fatal: corrupt commit graph", 128),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, mergeFailure)).rejects.toThrow("fatal: corrupt commit graph");
+  });
+
   test("missing merge history distinguishes shallow and unrelated repositories", async () => {
     const common = {
       "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
       "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
       "git config --get extensions.partialClone": fail("", 1),
-      "git config --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+      "git config --type=bool --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
       "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
       "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
       "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("", 1),
