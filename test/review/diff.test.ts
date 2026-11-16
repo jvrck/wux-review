@@ -27,6 +27,10 @@ const PR_REFS = {
   headRefOid: "89abcdef0123456789abcdef0123456789abcdef",
   baseRefName: "main",
 };
+const BASE_BLOB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HEAD_BLOB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const GITLINK_ONE = "cccccccccccccccccccccccccccccccccccccccc";
+const GITLINK_TWO = "dddddddddddddddddddddddddddddddddddddddd";
 
 const MAXIMUM_FILES_RESPONSE = await Bun.file(
   new URL("../fixtures/gh-pr-diff-maximum-files.stderr", import.meta.url),
@@ -76,13 +80,18 @@ function git(root: string, args: string[]): string {
 }
 
 function localGitRun(root: string, refs: typeof PR_REFS, calls?: string[][]): Run {
-  return async (cmd) => {
+  return async (cmd, stdin?: string) => {
     calls?.push(cmd);
     if (cmd.join(" ") === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
     if (cmd.join(" ") === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") {
       return ok(JSON.stringify(refs));
     }
-    const process = Bun.spawn(cmd, { cwd: root, stdout: "pipe", stderr: "pipe" });
+    const process = Bun.spawn(cmd, {
+      cwd: root,
+      stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const [stdout, stderr, code] = await Promise.all([
       new Response(process.stdout).text(),
       new Response(process.stderr).text(),
@@ -92,12 +101,13 @@ function localGitRun(root: string, refs: typeof PR_REFS, calls?: string[][]): Ru
   };
 }
 
-function partialCloneFallbackRun(version: string): { calls: string[][]; run: Run } {
+function partialCloneFallbackRun(version: string): { batchInputs: string[]; calls: string[][]; run: Run } {
+  const batchInputs: string[] = [];
   const calls: string[][] = [];
   const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
   return {
     calls,
-    run: async (cmd) => {
+    run: async (cmd, stdin?: string) => {
       calls.push(cmd);
       const key = cmd.join(" ");
       if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
@@ -110,11 +120,16 @@ function partialCloneFallbackRun(version: string): { calls: string[][]; run: Run
         return ok(`${PR_REFS.baseRefOid}\n`);
       }
       if (key === `git --no-lazy-fetch -c core.quotePath=false diff --raw --no-abbrev -z ${range}`) {
-        return ok(`:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`);
+        return ok(`:100644 100644 ${BASE_BLOB} ${HEAD_BLOB} M\0x.ts\0`);
+      }
+      if (key === "git --no-lazy-fetch cat-file --batch-check") {
+        batchInputs.push(stdin ?? "");
+        return ok(`${BASE_BLOB} blob 4\n${HEAD_BLOB} blob 4\n`);
       }
       if (key === `git --no-lazy-fetch -c core.quotePath=false diff ${range}`) return ok(SAMPLE_DIFF);
       throw new Error(`unexpected command: ${key}`);
     },
+    batchInputs,
   };
 }
 
@@ -262,7 +277,7 @@ describe("getDiff", () => {
   });
 
   test("partial clones on Git 2.45 run every fallback command with --no-lazy-fetch", async () => {
-    const { calls, run } = partialCloneFallbackRun("2.45.0");
+    const { batchInputs, calls, run } = partialCloneFallbackRun("2.45.0");
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
     const traversal = calls.slice(4);
     expect(traversal.every((command) => command[0] === "git" && command[1] === "--no-lazy-fetch")).toBe(true);
@@ -271,8 +286,43 @@ describe("getDiff", () => {
       ["git", "--no-lazy-fetch", "cat-file", "-e", `${PR_REFS.headRefOid}^{commit}`],
       ["git", "--no-lazy-fetch", "merge-base", PR_REFS.baseRefOid, PR_REFS.headRefOid],
       ["git", "--no-lazy-fetch", "-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "-z", `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`],
+      ["git", "--no-lazy-fetch", "cat-file", "--batch-check"],
       ["git", "--no-lazy-fetch", "-c", "core.quotePath=false", "diff", `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`],
     ].map((command) => command.join(" ")).sort());
+    expect(batchInputs).toEqual([`${BASE_BLOB}\n${HEAD_BLOB}\n`]);
+  });
+
+  test("the batch pre-check skips gitlink IDs while reviewing a gitlink add and update", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    const batchInputs: string[] = [];
+    const run: Run = async (cmd, stdin?: string) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
+      if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
+      if (key === "git config --get extensions.partialClone") return fail("", 1);
+      if (key === "git config --type=bool --get-regexp ^remote\\..*\\.promisor$") return fail("", 1);
+      if (key === `git cat-file -e ${PR_REFS.baseRefOid}^{commit}`) return ok("");
+      if (key === `git cat-file -e ${PR_REFS.headRefOid}^{commit}`) return ok("");
+      if (key === `git merge-base ${PR_REFS.baseRefOid} ${PR_REFS.headRefOid}`) return ok(`${PR_REFS.baseRefOid}\n`);
+      if (key === `git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`) {
+        return ok([
+          `:000000 160000 ${"0".repeat(40)} ${GITLINK_ONE} A`, "deps/added",
+          `:160000 160000 ${GITLINK_ONE} ${GITLINK_TWO} M`, "deps/updated",
+          `:100644 100644 ${BASE_BLOB} ${HEAD_BLOB} M`, "x.ts",
+        ].join("\0") + "\0");
+      }
+      if (key === "git cat-file --batch-check") {
+        batchInputs.push(stdin ?? "");
+        return ok(`${BASE_BLOB} blob 4\n${HEAD_BLOB} blob 4\n`);
+      }
+      if (key === `git -c core.quotePath=false diff ${range}`) return ok(SAMPLE_DIFF);
+      throw new Error(`unexpected command: ${key}`);
+    };
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({
+      diff: SAMPLE_DIFF,
+      files: ["deps/added", "deps/updated", "x.ts"],
+    });
+    expect(batchInputs).toEqual([`${BASE_BLOB}\n${HEAD_BLOB}\n`]);
   });
 
   test("a partial clone on Git 2.44 fails before fallback traversal", async () => {
@@ -295,7 +345,7 @@ describe("getDiff", () => {
 
   // Git v2.45 introduced --no-lazy-fetch; older Git is covered by the mocked
   // fail-closed test above rather than this real partial-clone integration test.
-  test.skipIf(!installedGitAtLeast(2, 45))("partial clones never lazy-fetch promised objects during fallback", async () => {
+  test.skipIf(!installedGitAtLeast(2, 45))("a missing partial-clone blob receives a fetch hint without lazy fetching", async () => {
     const root = mkdtempSync(join(tmpdir(), "wuxr-partial-clone-"));
     const source = join(root, "source");
     const remote = join(root, "remote.git");
@@ -312,26 +362,25 @@ describe("getDiff", () => {
       const headRefOid = git(source, ["rev-parse", "HEAD"]).trim();
       git(root, ["clone", "-q", "--bare", source, remote]);
       git(remote, ["config", "uploadpack.allowFilter", "true"]);
-      for (const filter of ["blob:none", "tree:0"]) {
-        const clone = join(root, `clone-${filter.replace(":", "-")}`);
-        git(root, ["clone", "-q", `--filter=${filter}`, "--no-checkout", `file://${remote}`, clone]);
-        const before = missingObjectIds(clone);
-        expect(before.length).toBeGreaterThan(0);
-        const calls: string[][] = [];
-        try {
-          await getDiff(
-            { kind: "pr", pr: 42 },
-            localGitRun(clone, { baseRefOid, headRefOid, baseRefName: "main" }, calls),
-          );
-        } catch (error) {
-          expect(error).toBeInstanceOf(Error);
-          expect((error as Error).message).not.toContain("partial clones aren't supported");
-        }
-        const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
-        expect(traversal.length).toBeGreaterThan(0);
-        expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
-        expect(missingObjectIds(clone)).toEqual(before);
+      const clone = join(root, "clone-blob-none");
+      git(root, ["clone", "-q", "--filter=blob:none", "--no-checkout", `file://${remote}`, clone]);
+      const before = missingObjectIds(clone);
+      expect(before.length).toBeGreaterThan(0);
+      const calls: string[][] = [];
+      let message = "";
+      try {
+        await getDiff(
+          { kind: "pr", pr: 42 },
+          localGitRun(clone, { baseRefOid, headRefOid, baseRefName: "main" }, calls),
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
       }
+      expect(message).toContain("run: git fetch origin 'refs/heads/main' 'pull/42/head'");
+      const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
+      expect(traversal.length).toBeGreaterThan(0);
+      expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
+      expect(missingObjectIds(clone)).toEqual(before);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
