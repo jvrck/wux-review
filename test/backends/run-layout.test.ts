@@ -119,6 +119,18 @@ describe("PR1 run layout", () => {
     expect((await stat(appRoot)).mode & 0o777).toBe(0o700);
   });
 
+  test("T-root-wrong-uid: an owned-root check fails closed for another uid", async () => {
+    const stateDir = await stateRoot();
+    const uid = process.getuid?.();
+    if (uid === undefined) return;
+    const getuid = spyOn(process, "getuid").mockReturnValue(uid + 1);
+    try {
+      await expect(ensureRunsRoot({ stateDir })).rejects.toThrow();
+    } finally {
+      getuid.mockRestore();
+    }
+  });
+
   test("T-root-foreign-entries: foreign entries stay untouched and warn once per pass", async () => {
     const stateDir = await stateRoot();
     const root = await ensureRunsRoot({ stateDir });
@@ -193,6 +205,26 @@ describe("PR1 run layout", () => {
 
     expect(await Bun.file(run.path).exists()).toBe(false);
     expect((await stat(outside)).isDirectory()).toBe(true);
+  });
+
+  test("T-run-wrong-uid: a run belonging to another uid is kept", async () => {
+    const stateDir = await stateRoot();
+    const run = await createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    });
+    const uid = process.getuid?.();
+    if (uid === undefined) return;
+    const getuid = spyOn(process, "getuid").mockReturnValue(uid + 1);
+    try {
+      await removeOwnedDir(run.path, { stateDir, tempDir: tmpdir() });
+      expect((await stat(run.path)).isDirectory()).toBe(true);
+    } finally {
+      getuid.mockRestore();
+    }
   });
 
   test("T-fifo-inside-run: recursive removal unlinks a FIFO without opening it", async () => {
