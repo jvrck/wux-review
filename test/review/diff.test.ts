@@ -328,6 +328,35 @@ describe("getDiff", () => {
     expect(batchInputs).toEqual([`${BASE_BLOB}\n${HEAD_BLOB}\n`]);
   });
 
+  test("the batch pre-check retains the regular side of gitlink type changes", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    for (const [metadata, blob] of [
+      [`:100644 160000 ${BASE_BLOB} ${GITLINK_ONE} T`, BASE_BLOB],
+      [`:160000 100644 ${GITLINK_TWO} ${HEAD_BLOB} T`, HEAD_BLOB],
+    ]) {
+      const batchInputs: string[] = [];
+      const run: Run = async (cmd, stdin?: string) => {
+        const key = cmd.join(" ");
+        if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
+        if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
+        if (key === "git config --get extensions.partialClone") return fail("", 1);
+        if (key === "git config --type=bool --get-regexp ^remote\\..*\\.promisor$") return fail("", 1);
+        if (key === `git cat-file -e ${PR_REFS.baseRefOid}^{commit}`) return ok("");
+        if (key === `git cat-file -e ${PR_REFS.headRefOid}^{commit}`) return ok("");
+        if (key === `git merge-base ${PR_REFS.baseRefOid} ${PR_REFS.headRefOid}`) return ok(`${PR_REFS.baseRefOid}\n`);
+        if (key === `git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`) return ok(`${metadata}\0changed-path\0`);
+        if (key === "git cat-file --batch-check") {
+          batchInputs.push(stdin ?? "");
+          return ok(`${blob} blob 4\n`);
+        }
+        if (key === `git -c core.quotePath=false diff ${range}`) return ok(SAMPLE_DIFF);
+        throw new Error(`unexpected command: ${key}`);
+      };
+      await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({ diff: SAMPLE_DIFF, files: ["changed-path"] });
+      expect(batchInputs).toEqual([`${blob}\n`]);
+    }
+  });
+
   test("a partial clone on Git 2.44 fails before fallback traversal", async () => {
     const calls: string[][] = [];
     const run: Run = async (cmd) => {
@@ -425,6 +454,48 @@ describe("getDiff", () => {
       const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
       expect(traversal.length).toBeGreaterThan(0);
       expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
+      expect(calls.filter((cmd) => cmd.join(" ").endsWith("cat-file --batch-check"))).toHaveLength(1);
+      expect(missingObjectIds(clone)).toEqual(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!installedGitAtLeast(2, 45))("gitlink type changes pre-check regular blobs in a partial clone", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wuxr-gitlink-transition-"));
+    const source = join(root, "source");
+    const remote = join(root, "remote.git");
+    const clone = join(root, "clone-blob-none");
+    try {
+      git(root, ["init", "-q", "-b", "main", source]);
+      git(source, ["config", "user.email", "test@example.com"]);
+      git(source, ["config", "user.name", "Test"]);
+      writeFileSync(join(source, "file-to-link"), "base file\n");
+      git(source, ["add", "file-to-link"]);
+      git(source, ["update-index", "--add", "--cacheinfo", `160000,${GITLINK_ONE},link-to-file`]);
+      git(source, ["commit", "-qm", "base"]);
+      const baseRefOid = git(source, ["rev-parse", "HEAD"]).trim();
+      git(source, ["update-index", "--add", "--cacheinfo", `160000,${GITLINK_TWO},file-to-link`]);
+      writeFileSync(join(source, "link-to-file"), "head file\n");
+      git(source, ["add", "link-to-file"]);
+      git(source, ["commit", "-qm", "head"]);
+      const headRefOid = git(source, ["rev-parse", "HEAD"]).trim();
+      git(root, ["clone", "-q", "--bare", source, remote]);
+      git(remote, ["config", "uploadpack.allowFilter", "true"]);
+      git(root, ["clone", "-q", "--filter=blob:none", "--no-checkout", `file://${remote}`, clone]);
+      const before = missingObjectIds(clone);
+      expect(before.length).toBeGreaterThan(0);
+      const calls: string[][] = [];
+      let message = "";
+      try {
+        await getDiff(
+          { kind: "pr", pr: 42 },
+          localGitRun(clone, { baseRefOid, headRefOid, baseRefName: "main" }, calls),
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain("run: git fetch origin 'refs/heads/main' 'pull/42/head'");
       expect(calls.filter((cmd) => cmd.join(" ").endsWith("cat-file --batch-check"))).toHaveLength(1);
       expect(missingObjectIds(clone)).toEqual(before);
     } finally {

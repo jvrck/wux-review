@@ -251,9 +251,9 @@ function parseRawPrDiff(raw: string): { files: string[]; objectIds: Set<string> 
     const objects = /^:([0-7]+) ([0-7]+) ([0-9a-f]+) ([0-9a-f]+) /.exec(metadata);
     // Gitlink object IDs belong to a submodule's object store, not this
     // checkout, so checking them here would reject an otherwise reviewable PR.
-    if (objects && objects[1] !== "160000" && objects[2] !== "160000") {
-      for (const objectId of [objects[3]!, objects[4]!]) {
-        if (!/^0+$/.test(objectId)) objectIds.add(objectId);
+    if (objects) {
+      for (const [mode, objectId] of [[objects[1]!, objects[3]!], [objects[2]!, objects[4]!]]) {
+        if (mode !== "160000" && !/^0+$/.test(objectId)) objectIds.add(objectId);
       }
     }
   }
