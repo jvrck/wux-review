@@ -694,17 +694,20 @@ export function appendPreparedChild(
     claude: [record.expected.claudeChildName],
     codex: [record.expected.codexChildName],
   };
-  if (prepared[reviewer].includes(childName)) return record;
-  if (attempt !== prepared[reviewer].length + 1) {
+  const alreadyPrepared = prepared[reviewer].includes(childName);
+  if (!alreadyPrepared && attempt !== prepared[reviewer].length + 1) {
     throw new WuxReviewError(
       `${childName} observable reviewer leg: non-sequential prepared attempt`,
     );
   }
+  if (alreadyPrepared && cleanupDir === undefined) return record;
   return {
     ...record,
     prepared: {
       ...prepared,
-      [reviewer]: [...prepared[reviewer], childName],
+      [reviewer]: alreadyPrepared
+        ? prepared[reviewer]
+        : [...prepared[reviewer], childName],
     },
     ...(cleanupDir === undefined
       ? {}
