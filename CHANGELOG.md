@@ -11,6 +11,15 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **Large pull-request diffs.** When GitHub declines a pull-request diff for
+  exceeding its file limit, wux-review now uses the equivalent local
+  `base...head` range when both commits and their merge base are available.
+  It never fetches automatically; missing commits and shallow history include
+  a fetch hint, unrelated histories fail clearly, and partial clones are
+  refused before local traversal.
+
 ## 2026.10.31
 
 ### Added

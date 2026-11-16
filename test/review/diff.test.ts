@@ -122,6 +122,58 @@ describe("getDiff", () => {
     );
   });
 
+  test("a promisor remote also fails closed before fallback traversal", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("", 1),
+      "git config --get-regexp ^remote\\..*\\.promisor$": ok("remote.origin.promisor true\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "partial clones aren't supported for the large-PR fallback yet",
+    );
+  });
+
+  test("missing local commits provide a fetch hint without fetching", async () => {
+    const run = mockRun({
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("", 1),
+      "git config --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": fail("fatal: not a valid object name", 128),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
+      "run: git fetch origin 'main' 'pull/42/head'",
+    );
+  });
+
+  test("missing merge history distinguishes shallow and unrelated repositories", async () => {
+    const common = {
+      "gh pr diff 42": fail(DIRECT_TOO_LARGE_RESPONSE, 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git config --get extensions.partialClone": fail("", 1),
+      "git config --get-regexp ^remote\\..*\\.promisor$": fail("", 1),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": fail("", 1),
+    };
+    const shallow = mockRun({
+      ...common,
+      "git rev-parse --is-shallow-repository": ok("true\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, shallow)).rejects.toThrow(
+      "run: git fetch --unshallow",
+    );
+
+    const unrelated = mockRun({
+      ...common,
+      "git rev-parse --is-shallow-repository": ok("false\n"),
+    });
+    await expect(getDiff({ kind: "pr", pr: 42 }, unrelated)).rejects.toThrow(
+      "have unrelated histories locally",
+    );
+  });
+
   test("range target uses git diff with stable path encoding (-z, quotePath off)", async () => {
     const run = mockRun({
       "git -c core.quotePath=false diff main...HEAD": ok(SAMPLE_DIFF),

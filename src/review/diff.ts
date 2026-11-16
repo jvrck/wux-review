@@ -26,7 +26,15 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const diff = await capture(run, ["gh", "pr", "diff", String(target.pr)]);
+      const command = ["gh", "pr", "diff", String(target.pr)];
+      const result = await run(command);
+      if (result.code !== 0) {
+        if (isLargePrDiffError(result.stderr)) {
+          return localPrDiff(target.pr, run);
+        }
+        throw captureError(command, result.stderr, result.code);
+      }
+      const diff = result.stdout;
       const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
       return finalize(diff, splitLines(names));
     }
@@ -61,6 +69,136 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       return finalize(diff, files);
     }
   }
+}
+
+interface PrRefs {
+  baseRefOid: string;
+  headRefOid: string;
+  baseRefName: string;
+}
+
+function isLargePrDiffError(stderr: string): boolean {
+  return /the diff exceeded the maximum number of files|HTTP 406:\s*Diff too large/i.test(stderr);
+}
+
+async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
+  const refs = await getPrRefs(pr, run);
+  await rejectPartialClone(run);
+  for (const sha of [refs.baseRefOid, refs.headRefOid]) {
+    await requireLocalCommit(pr, refs, sha, run);
+  }
+
+  const mergeBase = await run(["git", "merge-base", refs.baseRefOid, refs.headRefOid]);
+  if (mergeBase.code !== 0) {
+    if (mergeBase.code === 1) {
+      const shallow = await capture(run, ["git", "rev-parse", "--is-shallow-repository"]);
+      if (shallow.trim() === "true") {
+        throw new WuxReviewError(
+          `PR #${pr} is too large for gh pr diff and its merge base isn't available locally; run: git fetch --unshallow`,
+        );
+      }
+      throw new WuxReviewError(
+        `PR #${pr} is too large for gh pr diff and ${refs.baseRefOid} and ${refs.headRefOid} have unrelated histories locally`,
+      );
+    }
+    throw captureError(
+      ["git", "merge-base", refs.baseRefOid, refs.headRefOid],
+      mergeBase.stderr,
+      mergeBase.code,
+    );
+  }
+
+  const range = `${refs.baseRefOid}...${refs.headRefOid}`;
+  const [diff, files] = await Promise.all([
+    gitDiff(run, [range]),
+    gitRawNames(run, range),
+  ]);
+  process.stderr.write(
+    `wux-review: PR #${pr} exceeds GitHub's diff file limit; reviewing ${range} from local git\n`,
+  );
+  return finalize(diff, files);
+}
+
+async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
+  const raw = await capture(run, [
+    "gh",
+    "pr",
+    "view",
+    String(pr),
+    "--json",
+    "baseRefOid,headRefOid,baseRefName",
+  ]);
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new WuxReviewError(`gh pr view ${pr}: invalid JSON response`);
+  }
+  if (
+    typeof value !== "object"
+    || value === null
+    || !isObjectId((value as Partial<PrRefs>).baseRefOid)
+    || !isObjectId((value as Partial<PrRefs>).headRefOid)
+    || typeof (value as Partial<PrRefs>).baseRefName !== "string"
+    || (value as Partial<PrRefs>).baseRefName === ""
+  ) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing valid base or head commit information`);
+  }
+  return value as PrRefs;
+}
+
+function isObjectId(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+}
+
+async function rejectPartialClone(run: Run): Promise<void> {
+  for (const args of [
+    ["config", "--get", "extensions.partialClone"],
+    ["config", "--get-regexp", "^remote\\..*\\.promisor$"],
+  ]) {
+    const result = await run(["git", ...args]);
+    if (result.code === 0 && result.stdout.trim() !== "") {
+      throw new WuxReviewError("partial clones aren't supported for the large-PR fallback yet");
+    }
+    if (result.code !== 0 && result.code !== 1) {
+      throw captureError(["git", ...args], result.stderr, result.code);
+    }
+  }
+}
+
+async function requireLocalCommit(pr: number, refs: PrRefs, sha: string, run: Run): Promise<void> {
+  const command = ["git", "cat-file", "-e", `${sha}^{commit}`];
+  const result = await run(command);
+  if (result.code === 0) return;
+  const fetch = `git fetch origin ${shellQuote(refs.baseRefName)} ${shellQuote(`pull/${pr}/head`)}`;
+  throw new WuxReviewError(
+    `PR #${pr} is too large for gh pr diff and ${sha} isn't available locally; run: ${fetch}`,
+  );
+}
+
+async function gitRawNames(run: Run, range: string): Promise<string[]> {
+  const raw = await gitOut(run, ["diff", "--raw", "--no-abbrev", "-z", range]);
+  const fields = splitNul(raw);
+  const files: string[] = [];
+  for (let index = 0; index < fields.length;) {
+    const metadata = fields[index++];
+    if (metadata === undefined || !metadata.startsWith(":")) {
+      throw new WuxReviewError("git diff --raw returned malformed NUL-delimited output");
+    }
+    const status = metadata.split(" ").at(-1) ?? "";
+    const pathCount = status.startsWith("R") || status.startsWith("C") ? 2 : 1;
+    const paths = fields.slice(index, index + pathCount);
+    if (paths.length !== pathCount) {
+      throw new WuxReviewError("git diff --raw returned incomplete NUL-delimited paths");
+    }
+    index += pathCount;
+    files.push(paths[paths.length - 1]!);
+  }
+  return files;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function finalize(diff: string, files: string[]): ReviewDiff {
@@ -100,10 +238,14 @@ async function noIndexDiff(run: Run, file: string): Promise<string> {
 async function capture(run: Run, cmd: string[]): Promise<string> {
   const result = await run(cmd);
   if (result.code !== 0) {
-    const detail = result.stderr.trim() || `exit ${result.code}`;
-    throw new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
+    throw captureError(cmd, result.stderr, result.code);
   }
   return result.stdout;
+}
+
+function captureError(cmd: string[], stderr: string, code: number): WuxReviewError {
+  const detail = stderr.trim() || `exit ${code}`;
+  return new WuxReviewError(`${cmd.join(" ")}: ${detail}`);
 }
 
 function splitNul(out: string): string[] {
