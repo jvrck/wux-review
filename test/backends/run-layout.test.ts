@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createRunDirectory,
+  ensureRunsRoot,
   readRunJson,
   removeOwnedDir,
   validateCleanupDirectory,
@@ -66,6 +67,71 @@ describe("PR1 run layout", () => {
 
     await writeFile(record, "not json");
     expect(await readRunJson(run.path)).toBeUndefined();
+
+    await writeFile(record, JSON.stringify({
+      v: 1,
+      kind: "codex",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1,
+      legMaxMs: 900_000,
+    }));
+    expect(await readRunJson(run.path)).toBeUndefined();
+  });
+
+  test("T-runjson-fifo: the bounded reader does not block on a FIFO", async () => {
+    const stateDir = await stateRoot();
+    const run = await createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    });
+    const record = join(run.path, "run.json");
+    await rm(record);
+    expect(await Bun.spawn(["/usr/bin/mkfifo", record]).exited).toBe(0);
+
+    const result = await Promise.race([
+      readRunJson(run.path),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+    ]);
+    expect(result).toBeUndefined();
+  });
+
+  test("T-root-symlink / T-root-mode-0755: unsafe roots fail closed and owned roots are private", async () => {
+    const stateDir = await stateRoot();
+    const target = await mkdtemp(join(tmpdir(), "wuxr-run-target-"));
+    roots.push(target);
+    await symlink(target, join(stateDir, "wux-review"));
+    await expect(createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    })).rejects.toThrow();
+
+    const modeState = await stateRoot();
+    const appRoot = join(modeState, "wux-review");
+    await mkdir(appRoot);
+    await chmod(appRoot, 0o755);
+    await ensureRunsRoot({ stateDir: modeState });
+    expect((await stat(appRoot)).mode & 0o777).toBe(0o700);
+  });
+
+  test("T-root-foreign-entries: foreign entries stay untouched and warn once per pass", async () => {
+    const stateDir = await stateRoot();
+    const root = await ensureRunsRoot({ stateDir });
+    const foreign = join(root, "r-bad");
+    await writeFile(foreign, "foreign");
+    const write = spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await ensureRunsRoot({ stateDir });
+      expect(await Bun.file(foreign).text()).toBe("foreign");
+      expect(write).toHaveBeenCalledTimes(1);
+    } finally {
+      write.mockRestore();
+    }
   });
 
   test("T-L2-journal-accept and T-L2-reject-table: only exact owned cleanup shapes pass", async () => {
@@ -107,5 +173,49 @@ describe("PR1 run layout", () => {
 
     expect(await Bun.file(run.path).exists()).toBe(false);
     expect(await Bun.file(outside).text()).toBe("keep");
+  });
+
+  test("T-swap-to-symlink-before-rename: a replaced owned entry unlinks only the link", async () => {
+    const stateDir = await stateRoot();
+    const run = await createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    });
+    const outside = join(stateDir, "outside-directory");
+    await mkdir(outside);
+    await rm(run.path, { recursive: true });
+    await symlink(outside, run.path);
+
+    await removeOwnedDir(run.path, { stateDir, tempDir: tmpdir() });
+
+    expect(await Bun.file(run.path).exists()).toBe(false);
+    expect((await stat(outside)).isDirectory()).toBe(true);
+  });
+
+  test("T-fifo-inside-run: recursive removal unlinks a FIFO without opening it", async () => {
+    const stateDir = await stateRoot();
+    const run = await createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    });
+    const fifo = join(run.cwd, "fifo");
+    expect(await Bun.spawn(["/usr/bin/mkfifo", fifo]).exited).toBe(0);
+
+    await removeOwnedDir(run.path, { stateDir, tempDir: tmpdir() });
+
+    expect(await Bun.file(run.path).exists()).toBe(false);
+  });
+
+  test("T-single-recursive-remover: only the owned remover contains recursive filesystem deletion", async () => {
+    const source = await Bun.file(
+      new URL("../../src/backends/run-layout.ts", import.meta.url),
+    ).text();
+    expect(source.match(/rm\([^\n]*recursive: true/g)?.length).toBe(2);
   });
 });

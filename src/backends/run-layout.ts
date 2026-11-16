@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, rename, rm, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm, unlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -89,6 +89,10 @@ export async function ensureRunsRoot(options: CleanupPathOptions = {}): Promise<
   await secureDirectory(root);
   await mkdir(trash, { recursive: true, mode: 0o700 });
   await secureDirectory(trash);
+  const foreign = (await readdir(root)).filter((name) => name !== ".trash" && !RUN_NAME.test(name));
+  if (foreign.length > 0) {
+    process.stderr.write(`wux-review: leaving ${foreign.length} unowned ${foreign.length === 1 ? "entry" : "entries"} in runs root\n`);
+  }
   return root;
 }
 
@@ -162,7 +166,10 @@ export async function readRunJson(path: string): Promise<RunJson | undefined> {
     const { bytesRead } = await handle.read(bytes, 0, bytes.byteLength, 0);
     if (bytesRead > RUN_JSON_LIMIT_BYTES) return undefined;
     const parsed: unknown = JSON.parse(bytes.subarray(0, bytesRead).toString("utf8"));
-    return isRunJson(parsed) ? parsed : undefined;
+    if (!isRunJson(parsed)) return undefined;
+    const name = RUN_NAME.exec(basename(path));
+    const nameCreatedMs = name === null ? undefined : Number.parseInt(name[0].split("-")[1]!, 36);
+    return nameCreatedMs !== undefined && parsed.deadlineMs < nameCreatedMs ? undefined : parsed;
   } catch {
     return undefined;
   } finally {

@@ -59,7 +59,7 @@ test("T-adapter-rm-nonrecursive: the default adapter refuses to remove a directo
       timedOut: false,
     }));
     await expect(deps.rm(dir)).rejects.toThrow();
-    expect(await Bun.file(dir).exists()).toBe(true);
+    expect((await stat(dir)).isDirectory()).toBe(true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

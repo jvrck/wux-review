@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -201,7 +201,17 @@ export function defaultObservableDeps(run: ObservableRun): ObservableAdapterDeps
   return {
     run,
     mkdir: (path) => mkdir(path, { recursive: true }).then(() => undefined),
-    rm: (path) => rm(path, { force: true }).then(() => undefined),
+    rm: async (path) => {
+      try {
+        if ((await lstat(path)).isDirectory()) {
+          throw new Error("observable adapter rm refuses directories");
+        }
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      await rm(path, { force: true });
+    },
     writeFile: (path, content) => Bun.write(path, content).then(() => undefined),
     writePrivateFile: (path, content) => writeFile(path, content, {
       encoding: "utf8",
