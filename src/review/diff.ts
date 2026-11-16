@@ -117,7 +117,16 @@ async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   }
 
   const range = `${refs.baseRefOid}...${refs.headRefOid}`;
-  const raw = await fallbackGitOut(git, ["diff", "--raw", "--no-abbrev", "-z", range]);
+  const rawCommand = ["-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "-z", range];
+  const rawResult = await fallbackGit(git, rawCommand);
+  if (rawResult.code !== 0) {
+    const missing = missingObjectIds(rawResult.stderr);
+    if (missing.size > 0) {
+      await requireLocalRangeObjects(pr, refs, range, missing, git);
+    }
+    throw captureFallbackError(git, rawCommand, rawResult.stderr, rawResult.code);
+  }
+  const raw = rawResult.stdout;
   const { files, objectIds } = parseRawPrDiff(raw);
   await requireLocalRangeObjects(pr, refs, range, objectIds, git);
   const reviewDiff = finalize(await fallbackGitDiff(git, [range]), files);
@@ -251,6 +260,18 @@ function parseRawPrDiff(raw: string): { files: string[]; objectIds: Set<string> 
   return { files, objectIds };
 }
 
+function missingObjectIds(stderr: string): Set<string> {
+  const objectIds = new Set<string>();
+  for (const pattern of [
+    /unable to read tree \(([0-9a-f]{40,64})\)/gi,
+    /(?:not a valid object name|invalid object name|bad object|unknown revision) ([0-9a-f]{40,64})/gi,
+    /could not fetch ([0-9a-f]{40,64}) from promisor remote/gi,
+  ]) {
+    for (const match of stderr.matchAll(pattern)) objectIds.add(match[1]!);
+  }
+  return objectIds;
+}
+
 async function requireLocalRangeObjects(
   pr: number,
   refs: PrRefs,
@@ -262,6 +283,9 @@ async function requireLocalRangeObjects(
   const command = ["cat-file", "--batch-check"];
   const input = `${Array.from(objectIds).join("\n")}\n`;
   const result = await fallbackGit(git, command, input);
+  if (result.stderr.trim() !== "") {
+    throw captureFallbackError(git, command, result.stderr, result.code);
+  }
   if (result.code !== 0) {
     throw captureFallbackError(git, command, result.stderr, result.code);
   }

@@ -22,7 +22,9 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   cannot download promised objects; older Git fails before traversal.
   Required range objects are checked in one local batch before the fallback
   diff, so missing blobs receive the same fetch hint rather than a raw Git
-  failure; submodule gitlinks are not checked in the superproject object store.
+  failure. A missing tree named by the raw preflight receives that same hint,
+  while corrupt-object diagnostics remain Git errors; submodule gitlinks are
+  not checked in the superproject object store.
 
 ## 2026.10.31
 

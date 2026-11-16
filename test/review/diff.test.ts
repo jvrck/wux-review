@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDiff } from "../../src/review/diff";
@@ -383,6 +383,7 @@ describe("getDiff", () => {
       const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
       expect(traversal.length).toBeGreaterThan(0);
       expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
+      expect(calls.filter((cmd) => cmd.join(" ").endsWith("cat-file --batch-check"))).toHaveLength(1);
       expect(missingObjectIds(clone)).toEqual(before);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -411,18 +412,55 @@ describe("getDiff", () => {
       const before = missingObjectIds(clone);
       expect(before.length).toBeGreaterThan(0);
       const calls: string[][] = [];
+      let message = "";
       try {
         await getDiff(
           { kind: "pr", pr: 42 },
           localGitRun(clone, { baseRefOid, headRefOid, baseRefName: "main" }, calls),
         );
       } catch (error) {
-        expect(error).toBeInstanceOf(Error);
+        message = error instanceof Error ? error.message : String(error);
       }
+      expect(message).toContain("run: git fetch origin 'refs/heads/main' 'pull/42/head'");
       const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
       expect(traversal.length).toBeGreaterThan(0);
       expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
+      expect(calls.filter((cmd) => cmd.join(" ").endsWith("cat-file --batch-check"))).toHaveLength(1);
       expect(missingObjectIds(clone)).toEqual(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a corrupt range object preserves the batch-check diagnostic", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wuxr-corrupt-object-"));
+    try {
+      git(root, ["init", "-q", "-b", "main", "."]);
+      git(root, ["config", "user.email", "test@example.com"]);
+      git(root, ["config", "user.name", "Test"]);
+      writeFileSync(join(root, "x.txt"), "base\n");
+      git(root, ["add", "x.txt"]);
+      git(root, ["commit", "-qm", "base"]);
+      const baseRefOid = git(root, ["rev-parse", "HEAD"]).trim();
+      writeFileSync(join(root, "x.txt"), "head\n");
+      git(root, ["commit", "-am", "head", "-q"]);
+      const headRefOid = git(root, ["rev-parse", "HEAD"]).trim();
+      const blob = git(root, ["rev-parse", "HEAD:x.txt"]).trim();
+      const objectPath = join(root, ".git", "objects", blob.slice(0, 2), blob.slice(2));
+      chmodSync(objectPath, 0o600);
+      writeFileSync(objectPath, "corrupt");
+
+      let message = "";
+      try {
+        await getDiff(
+          { kind: "pr", pr: 42 },
+          localGitRun(root, { baseRefOid, headRefOid, baseRefName: "main" }),
+        );
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toMatch(/inflate|unable to unpack/i);
+      expect(message).not.toContain("run: git fetch");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
