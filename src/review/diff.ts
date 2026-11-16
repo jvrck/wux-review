@@ -117,11 +117,19 @@ async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   }
 
   const range = `${refs.baseRefOid}...${refs.headRefOid}`;
-  const [diff, files] = await Promise.all([
-    fallbackGitDiff(git, [range]),
-    gitRawNames(git, range),
-  ]);
-  const reviewDiff = finalize(diff, files);
+  const rawCommand = ["-c", "core.quotePath=false", "diff", "--raw", "--no-abbrev", "-z", range];
+  const rawResult = await fallbackGit(git, rawCommand);
+  if (rawResult.code !== 0) {
+    const missing = missingObjectIds(rawResult.stderr);
+    if (missing.size > 0) {
+      await requireLocalRangeObjects(pr, refs, range, missing, git);
+    }
+    throw captureFallbackError(git, rawCommand, rawResult.stderr, rawResult.code);
+  }
+  const raw = rawResult.stdout;
+  const { files, objectIds } = parseRawPrDiff(raw);
+  await requireLocalRangeObjects(pr, refs, range, objectIds, git);
+  const reviewDiff = finalize(await fallbackGitDiff(git, [range]), files);
   process.stderr.write(
     `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
@@ -222,10 +230,10 @@ async function requireLocalCommit(pr: number, refs: PrRefs, sha: string, git: Fa
   );
 }
 
-async function gitRawNames(git: FallbackGit, range: string): Promise<string[]> {
-  const raw = await fallbackGitOut(git, ["diff", "--raw", "--no-abbrev", "-z", range]);
+function parseRawPrDiff(raw: string): { files: string[]; objectIds: Set<string> } {
   const fields = splitNul(raw);
   const files: string[] = [];
+  const objectIds = new Set<string>();
   for (let index = 0; index < fields.length;) {
     const metadata = fields[index++];
     if (metadata === undefined || !metadata.startsWith(":")) {
@@ -239,8 +247,62 @@ async function gitRawNames(git: FallbackGit, range: string): Promise<string[]> {
     }
     index += pathCount;
     files.push(paths[paths.length - 1]!);
+
+    const objects = /^:([0-7]+) ([0-7]+) ([0-9a-f]+) ([0-9a-f]+) /.exec(metadata);
+    // Gitlink object IDs belong to a submodule's object store, not this
+    // checkout, so checking them here would reject an otherwise reviewable PR.
+    if (objects) {
+      for (const [mode, objectId] of [[objects[1]!, objects[3]!], [objects[2]!, objects[4]!]]) {
+        if (mode !== "160000" && !/^0+$/.test(objectId)) objectIds.add(objectId);
+      }
+    }
   }
-  return files;
+  return { files, objectIds };
+}
+
+function missingObjectIds(stderr: string): Set<string> {
+  const objectIds = new Set<string>();
+  for (const pattern of [
+    /unable to read tree \(([0-9a-f]{40,64})\)/gi,
+    /(?:not a valid object name|invalid object name|bad object|unknown revision) ([0-9a-f]{40,64})/gi,
+    /could not fetch ([0-9a-f]{40,64}) from promisor remote/gi,
+  ]) {
+    for (const match of stderr.matchAll(pattern)) objectIds.add(match[1]!);
+  }
+  return objectIds;
+}
+
+async function requireLocalRangeObjects(
+  pr: number,
+  refs: PrRefs,
+  range: string,
+  objectIds: Set<string>,
+  git: FallbackGit,
+): Promise<void> {
+  if (objectIds.size === 0) return;
+  const command = ["cat-file", "--batch-check"];
+  const input = `${Array.from(objectIds).join("\n")}\n`;
+  const result = await fallbackGit(git, command, input);
+  if (result.stderr.trim() !== "") {
+    throw captureFallbackError(git, command, result.stderr, result.code);
+  }
+  if (result.code !== 0) {
+    throw captureFallbackError(git, command, result.stderr, result.code);
+  }
+  const lines = result.stdout.split("\n").filter((line) => line !== "");
+  if (lines.length !== objectIds.size || lines.some((line) => !objectIds.has(line.split(" ")[0]!))) {
+    throw new WuxReviewError("git cat-file --batch-check returned unexpected object output");
+  }
+  const missing = lines.some((line) => {
+    const match = /^([0-9a-f]+) missing$/i.exec(line);
+    return match !== null && objectIds.has(match[1]!);
+  });
+  if (missing) {
+    const fetch = `git fetch origin ${shellQuote(`refs/heads/${refs.baseRefName}`)} ${shellQuote(`pull/${pr}/head`)}`;
+    throw new WuxReviewError(
+      `PR #${pr} is too large for gh pr diff and objects required for ${range} aren't available locally; run: ${fetch}`,
+    );
+  }
 }
 
 function shellQuote(value: string): string {
@@ -283,9 +345,9 @@ async function fallbackGitOut(git: FallbackGit, args: string[]): Promise<string>
 
 // Git v2.45 introduced --no-lazy-fetch; see its release notes:
 // https://github.com/git/git/blob/v2.45.0/Documentation/RelNotes/2.45.0.adoc
-async function fallbackGit(git: FallbackGit, args: string[]): Promise<RunResult> {
+async function fallbackGit(git: FallbackGit, args: string[], stdin?: string): Promise<RunResult> {
   const prefix = git.noLazyFetch ? ["git", "--no-lazy-fetch"] : ["git"];
-  return git.run([...prefix, ...args]);
+  return git.run([...prefix, ...args], stdin);
 }
 
 // `git diff --no-index` exits 1 when the inputs differ (which is always, here:
