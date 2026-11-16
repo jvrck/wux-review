@@ -19,6 +19,25 @@ function mockRun(table: Record<string, RunResult>): Run {
 }
 
 const SAMPLE_DIFF = "diff --git a/x.ts b/x.ts\n@@ -1 +1 @@\n-old\n+new\n";
+const PR_REFS = {
+  baseRefOid: "0123456789abcdef0123456789abcdef01234567",
+  headRefOid: "89abcdef0123456789abcdef0123456789abcdef",
+  baseRefName: "main",
+};
+
+async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const writes: string[] = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = ((chunk: string) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: await fn(), stderr: writes.join("") };
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+}
 
 describe("getDiff", () => {
   test("pr target shells out to gh pr diff", async () => {
@@ -29,6 +48,23 @@ describe("getDiff", () => {
     const { diff, files } = await getDiff({ kind: "pr", pr: 42 }, run);
     expect(diff).toBe(SAMPLE_DIFF);
     expect(files).toEqual(["x.ts"]);
+  });
+
+  test("too-large PR diffs fall back to the complete matching local range", async () => {
+    const range = `${PR_REFS.baseRefOid}...${PR_REFS.headRefOid}`;
+    const run = mockRun({
+      "gh pr diff 42": fail("HTTP 406: the diff exceeded the maximum number of files", 1),
+      "gh pr view 42 --json baseRefOid,headRefOid,baseRefName": ok(JSON.stringify(PR_REFS)),
+      "git cat-file -e 0123456789abcdef0123456789abcdef01234567^{commit}": ok(""),
+      "git cat-file -e 89abcdef0123456789abcdef0123456789abcdef^{commit}": ok(""),
+      "git merge-base 0123456789abcdef0123456789abcdef01234567 89abcdef0123456789abcdef0123456789abcdef": ok("0123456789abcdef0123456789abcdef01234567\n"),
+      [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
+      [`git -c core.quotePath=false diff -z --name-only ${range}`]: z("x.ts", "sub/y.ts"),
+    });
+
+    const { result, stderr } = await captureStderr(() => getDiff({ kind: "pr", pr: 42 }, run));
+    expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts", "sub/y.ts"] });
+    expect(stderr).toContain(`reviewing ${range} from local git`);
   });
 
   test("range target uses git diff with stable path encoding (-z, quotePath off)", async () => {
