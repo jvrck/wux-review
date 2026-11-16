@@ -20,6 +20,9 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
   a fetch hint, unrelated histories fail clearly, and partial clones require
   Git 2.45 or newer. Their fallback traversal uses `--no-lazy-fetch` so it
   cannot download promised objects; older Git fails before traversal.
+  Required range objects are checked in one local batch before the fallback
+  diff, so missing blobs receive the same fetch hint rather than a raw Git
+  failure; submodule gitlinks are not checked in the superproject object store.
 
 ## 2026.10.31
 

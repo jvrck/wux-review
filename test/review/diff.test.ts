@@ -12,8 +12,11 @@ const z = (...parts: string[]): RunResult => ok(parts.map((p) => `${p}\0`).join(
 
 // Build a mock runner from a map of "joined command" -> RunResult.
 function mockRun(table: Record<string, RunResult>): Run {
-  return async (cmd: string[]) => {
+  return async (cmd: string[], stdin?: string) => {
     const key = cmd.join(" ");
+    if (key === "git cat-file --batch-check") {
+      return ok((stdin ?? "").split("\n").filter(Boolean).map((objectId) => `${objectId} blob 4\n`).join(""));
+    }
     if (!(key in table)) {
       throw new Error(`unexpected command: ${key}`);
     }
@@ -377,6 +380,45 @@ describe("getDiff", () => {
         message = error instanceof Error ? error.message : String(error);
       }
       expect(message).toContain("run: git fetch origin 'refs/heads/main' 'pull/42/head'");
+      const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
+      expect(traversal.length).toBeGreaterThan(0);
+      expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);
+      expect(missingObjectIds(clone)).toEqual(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!installedGitAtLeast(2, 45))("a tree-filter partial clone does not lazy-fetch during fallback", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wuxr-partial-tree-"));
+    const source = join(root, "source");
+    const remote = join(root, "remote.git");
+    const clone = join(root, "clone-tree-zero");
+    try {
+      git(root, ["init", "-q", "-b", "main", source]);
+      git(source, ["config", "user.email", "test@example.com"]);
+      git(source, ["config", "user.name", "Test"]);
+      writeFileSync(join(source, "x.txt"), "base\n");
+      git(source, ["add", "x.txt"]);
+      git(source, ["commit", "-qm", "base"]);
+      const baseRefOid = git(source, ["rev-parse", "HEAD"]).trim();
+      writeFileSync(join(source, "x.txt"), "head\n");
+      git(source, ["commit", "-am", "head", "-q"]);
+      const headRefOid = git(source, ["rev-parse", "HEAD"]).trim();
+      git(root, ["clone", "-q", "--bare", source, remote]);
+      git(remote, ["config", "uploadpack.allowFilter", "true"]);
+      git(root, ["clone", "-q", "--filter=tree:0", "--no-checkout", `file://${remote}`, clone]);
+      const before = missingObjectIds(clone);
+      expect(before.length).toBeGreaterThan(0);
+      const calls: string[][] = [];
+      try {
+        await getDiff(
+          { kind: "pr", pr: 42 },
+          localGitRun(clone, { baseRefOid, headRefOid, baseRefName: "main" }, calls),
+        );
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+      }
       const traversal = calls.filter((cmd) => cmd[0] === "git" && cmd[1] !== "config" && cmd[1] !== "--version");
       expect(traversal.length).toBeGreaterThan(0);
       expect(traversal.every((cmd) => cmd[1] === "--no-lazy-fetch")).toBe(true);

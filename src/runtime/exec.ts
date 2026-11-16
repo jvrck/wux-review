@@ -6,10 +6,14 @@ export interface RunResult {
   stderr: string;
 }
 
-export type Run = (cmd: string[]) => Promise<RunResult>;
+export type Run = (cmd: string[], stdin?: string) => Promise<RunResult>;
 
-export const run: Run = async (cmd: string[]): Promise<RunResult> => {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+export const run: Run = async (cmd: string[], stdin?: string): Promise<RunResult> => {
+  const proc = Bun.spawn(cmd, {
+    stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

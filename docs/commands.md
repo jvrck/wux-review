@@ -63,7 +63,7 @@ reviewers:
 ## Options
 | Flag | Meaning |
 |------|---------|
-| `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). If GitHub declines an oversized diff, wux-review uses the local `base...head` range when its commits and merge base are already available. It never fetches automatically; partial clones require Git 2.45 or newer and use `--no-lazy-fetch` to avoid downloading promised objects. Older Git fails before traversal. |
+| `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). If GitHub declines an oversized diff, wux-review uses the local `base...head` range when its commits and merge base are already available. It never fetches automatically; before the fallback diff it checks required local range objects in one batch and prints the fetch hint if one is missing. Gitlinks are not checked in the superproject object store. Partial clones require Git 2.45 or newer and use `--no-lazy-fetch` to avoid downloading promised objects. Older Git fails before traversal. |
 | `--lenses <list>` | Comma-separated lens-set override. The default set is `correctness`, `edge-cases`, `security`, `regression`, `clarity`; `default` expands to that set. |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |
