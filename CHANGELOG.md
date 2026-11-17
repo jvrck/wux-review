@@ -11,6 +11,8 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+## 2026.11.17
+
 ### Fixed
 
 - **Large pull-request diffs.** When GitHub declines a pull-request diff for
