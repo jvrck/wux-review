@@ -263,8 +263,12 @@ describe("review pipeline (in-process, injected reviewers)", () => {
     const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
     const cwd = realpathSync(dir);
     const previousCeiling = process.env.GIT_CEILING_DIRECTORIES;
+    const previousGitDir = process.env.GIT_DIR;
+    const previousGitWorkTree = process.env.GIT_WORK_TREE;
     let reviewerCalls = 0;
     process.env.GIT_CEILING_DIRECTORIES = dirname(cwd);
+    delete process.env.GIT_DIR;
+    delete process.env.GIT_WORK_TREE;
     try {
       const failed = await callCli(["HEAD~1"], cwd, {
         runReviewers: async () => {
@@ -283,6 +287,55 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       const version = await callCli(["--version"], cwd, {});
       expect(version.code).toBe(0);
       expect(version.stdout.trim()).toBe(process.env.WUX_REVIEW_VERSION || "0.0.0-dev");
+
+      const reconciled = await callCli(["reconcile", "recover-1"], cwd, {
+        reconcileReview: async (reviewId) => ({
+          kind: "terminal-cleanup-completed",
+          reviewId,
+          state: "failed",
+          diagnostic: "recovery reached its handler",
+        }),
+      });
+      expect(reconciled.code).toBe(0);
+      expect(reconciled.stdout).toContain("recovery reached its handler");
+
+      let ended: string | undefined;
+      const endedSession = await callCli(["--session", "cleanup-1", "--end-session"], cwd, {
+        endSession: async (sessionId) => {
+          ended = sessionId;
+        },
+      });
+      expect(endedSession.code).toBe(0);
+      expect(ended).toBe("cleanup-1");
+    } finally {
+      if (previousCeiling === undefined) {
+        delete process.env.GIT_CEILING_DIRECTORIES;
+      } else {
+        process.env.GIT_CEILING_DIRECTORIES = previousCeiling;
+      }
+      if (previousGitDir === undefined) {
+        delete process.env.GIT_DIR;
+      } else {
+        process.env.GIT_DIR = previousGitDir;
+      }
+      if (previousGitWorkTree === undefined) {
+        delete process.env.GIT_WORK_TREE;
+      } else {
+        process.env.GIT_WORK_TREE = previousGitWorkTree;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a review argument named --end-session does not bypass the checkout guard", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
+    const cwd = realpathSync(dir);
+    const previousCeiling = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.GIT_CEILING_DIRECTORIES = dirname(cwd);
+    try {
+      const result = await callCli(["HEAD~1", "--end-session"], cwd, {});
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`wux-review: not a git checkout: ${cwd}\n`);
     } finally {
       if (previousCeiling === undefined) {
         delete process.env.GIT_CEILING_DIRECTORIES;
@@ -290,6 +343,26 @@ describe("review pipeline (in-process, injected reviewers)", () => {
         process.env.GIT_CEILING_DIRECTORIES = previousCeiling;
       }
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-git cwd rejects an unrelated GIT_DIR and GIT_WORK_TREE before reviewers start", async () => {
+    const repo = gitRepo();
+    const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
+    const cwd = realpathSync(dir);
+    try {
+      // An invalid MCP invocation exits before it can start the server or a
+      // reviewer. Run it in a child so the guard receives the Git variables as
+      // inherited environment, just as the production CLI does.
+      const result = await run(["mcp", "unexpected"], {
+        GIT_DIR: join(repo, ".git"),
+        GIT_WORK_TREE: repo,
+      }, cwd);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`wux-review: not a git checkout: ${cwd}\n`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 
