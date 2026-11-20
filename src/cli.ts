@@ -84,6 +84,7 @@ Config:
 export interface ReviewOptions {
   ref?: string;
   pr?: number;
+  expectedHead?: string;
   lenses?: string[];
   postToPr?: number;
   session?: string;
@@ -222,6 +223,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       {
         ref: opts.ref,
         pr: opts.pr,
+        expectedHead: opts.expectedHead,
         lenses: opts.lenses,
         session: opts.session,
         direct: opts.direct,
@@ -256,7 +258,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       if (posted.length > 0) {
         const round = posted[0]!.round;
         const legs = posted.map((p) => `${p.reviewer} ${p.url}`).join(" · ");
-        process.stderr.write(`wux-review: verdict posted (round ${round}) — ${legs}\n`);
+        const head = envelope.head === undefined ? "" : `, head ${envelope.head.slice(0, 12)}`;
+        process.stderr.write(`wux-review: verdict posted (round ${round}${head}) — ${legs}\n`);
       }
     } catch (err) {
       const message = err instanceof WuxReviewError ? err.message : (err as Error).message;
@@ -310,6 +313,9 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
     switch (arg) {
       case "--pr":
         opts.pr = intValue(argv, ++i, "--pr");
+        break;
+      case "--expect-head":
+        opts.expectedHead = value(argv, ++i, "--expect-head");
         break;
       case "--lenses": {
         const lenses = value(argv, ++i, "--lenses")

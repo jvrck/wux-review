@@ -23,14 +23,15 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
       inputSchema: {
         ref: z.string().min(1).optional(),
         pr: z.number().int().positive().optional(),
+        expect_head: z.string().min(1).optional(),
         lenses: z.array(z.string().min(1)).min(1).optional(),
         post_to_pr: z.number().int().positive().optional(),
         session: z.string().min(1).optional(),
       },
     },
-    async ({ ref, pr, lenses, post_to_pr, session }) => {
+    async ({ ref, pr, expect_head, lenses, post_to_pr, session }) => {
       const envelope = await runReview(
-        { ref, pr, lenses, session },
+        { ref, pr, expectedHead: expect_head, lenses, session },
         {
           runReviewers: deps.runReviewers,
           loadConfig: deps.loadConfig,

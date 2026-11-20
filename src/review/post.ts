@@ -153,7 +153,8 @@ export function renderAgentComment(envelope: VerdictEnvelope, reviewer: Reviewer
   // human or orchestrator detects a fresh re-review verdict — by the round marker /
   // updated timestamp, never by a new comment appearing.
   const headerVerdict = envelope.reviewers[reviewer] === "block" ? "must-fix" : "clean";
-  lines.push(`**Dual-review (${reviewer}) — round ${envelope.round ?? 1} · updated ${updatedAt} · verdict: ${headerVerdict}**`);
+  const head = envelope.head === undefined ? "" : ` · head ${envelope.head.slice(0, 12)}`;
+  lines.push(`**Dual-review (${reviewer}) — round ${envelope.round ?? 1}${head} · updated ${updatedAt} · verdict: ${headerVerdict}**`);
   lines.push("");
   lines.push(`## wux-review · ${reviewer}: ${envelope.reviewers[reviewer] === "block" ? "🔴 block" : "🟢 approve"}`);
 

@@ -5,6 +5,7 @@ import type { Target } from "./target";
 export interface ReviewDiff {
   diff: string;
   files: string[];
+  head?: string;
 }
 
 // Fetch the unified diff + changed-file list for a resolved target. `run` is
@@ -22,6 +23,9 @@ export interface ReviewDiff {
 export async function getDiff(target: Target, run: Run = defaultRun): Promise<ReviewDiff> {
   switch (target.kind) {
     case "pr": {
+      if (target.expectedHead !== undefined) {
+        await waitForExpectedHead(target.pr, target.expectedHead, target.headWaitMs ?? 60_000, run);
+      }
       // `gh pr diff <n>` is the full base...head diff for the PR — the complete
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
@@ -36,6 +40,13 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       }
       const diff = result.stdout;
       const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
+      if (target.expectedHead !== undefined) {
+        const head = await readPrHead(target.pr, run);
+        if (head !== target.expectedHead) {
+          throw headMismatch(target.pr, head, target.expectedHead);
+        }
+        return { ...finalize(diff, splitLines(names)), head };
+      }
       return finalize(diff, splitLines(names));
     }
     case "range": {
@@ -69,6 +80,30 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       return finalize(diff, files);
     }
   }
+}
+
+async function waitForExpectedHead(pr: number, expected: string, waitMs: number, run: Run): Promise<void> {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  let actual = await readPrHead(pr, run);
+  while (actual !== expected) {
+    if (Date.now() >= deadline) throw headMismatch(pr, actual, expected);
+    await Bun.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+    actual = await readPrHead(pr, run);
+  }
+}
+
+async function readPrHead(pr: number, run: Run): Promise<string> {
+  const raw = await capture(run, ["gh", "pr", "view", String(pr), "--json", "headRefOid"]);
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new WuxReviewError(`gh pr view ${pr}: invalid JSON response`); }
+  if (typeof value !== "object" || value === null || !isObjectId((value as { headRefOid?: unknown }).headRefOid)) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing valid head commit information`);
+  }
+  return (value as { headRefOid: string }).headRefOid;
+}
+
+function headMismatch(pr: number, actual: string, expected: string): WuxReviewError {
+  return new WuxReviewError(`PR #${pr} head is ${actual}, expected ${expected}; push may not have landed`);
 }
 
 interface PrRefs {
