@@ -107,7 +107,19 @@ export async function loadConfig(dir?: string): Promise<WuxReviewConfig> {
 }
 
 export async function repoRoot(): Promise<string | undefined> {
-  const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
+  // Checkout discovery must describe the cwd itself, rather than a repository
+  // selected by a caller's ambient Git environment.
+  const environment = { ...process.env };
+  delete environment.GIT_DIR;
+  delete environment.GIT_WORK_TREE;
+  delete environment.GIT_COMMON_DIR;
+  delete environment.GIT_INDEX_FILE;
+  delete environment.GIT_NAMESPACE;
+  const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: environment,
+  });
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
   if (code !== 0 || out.trim() === "") {
     return undefined;
