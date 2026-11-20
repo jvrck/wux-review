@@ -11,6 +11,23 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+## 2026.11.17
+
+### Fixed
+
+- **Large pull-request diffs.** When GitHub declines a pull-request diff for
+  exceeding its size limit, wux-review now uses the equivalent local
+  `base...head` range when both commits and their merge base are available.
+  It never fetches automatically; missing commits and shallow history include
+  a fetch hint, unrelated histories fail clearly, and partial clones require
+  Git 2.45 or newer. Their fallback traversal uses `--no-lazy-fetch` so it
+  cannot download promised objects; older Git fails before traversal.
+  Required range objects are checked in one local batch before the fallback
+  diff, so missing blobs receive the same fetch hint rather than a raw Git
+  failure. A missing tree named by the raw preflight receives that same hint,
+  while corrupt-object diagnostics remain Git errors; submodule gitlinks are
+  not checked in the superproject object store.
+
 ## 2026.10.31
 
 ### Added
