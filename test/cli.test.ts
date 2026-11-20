@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type CliDeps, parseReviewArgs, runCli } from "../src/cli";
@@ -261,25 +261,26 @@ describe("reconcile subcommand", () => {
 describe("review pipeline (in-process, injected reviewers)", () => {
   test("a non-git cwd fails before either reviewer starts, while help and version remain available", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
+    const cwd = realpathSync(dir);
     const previousCeiling = process.env.GIT_CEILING_DIRECTORIES;
     let reviewerCalls = 0;
-    process.env.GIT_CEILING_DIRECTORIES = dirname(dir);
+    process.env.GIT_CEILING_DIRECTORIES = dirname(cwd);
     try {
-      const failed = await callCli(["HEAD~1"], dir, {
+      const failed = await callCli(["HEAD~1"], cwd, {
         runReviewers: async () => {
           reviewerCalls++;
           throw new Error("reviewers must not start outside a git checkout");
         },
       });
       expect(failed.code).toBe(1);
-      expect(failed.stderr).toBe(`wux-review: not a git checkout: ${dir}\n`);
+      expect(failed.stderr).toBe(`wux-review: not a git checkout: ${cwd}\n`);
       expect(reviewerCalls).toBe(0);
 
-      const help = await callCli(["--help"], dir, {});
+      const help = await callCli(["--help"], cwd, {});
       expect(help.code).toBe(0);
       expect(help.stdout).toContain("wux-review");
 
-      const version = await callCli(["--version"], dir, {});
+      const version = await callCli(["--version"], cwd, {});
       expect(version.code).toBe(0);
       expect(version.stdout.trim()).toBe(process.env.WUX_REVIEW_VERSION || "0.0.0-dev");
     } finally {

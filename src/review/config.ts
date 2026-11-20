@@ -104,7 +104,7 @@ export async function loadConfig(dir?: string): Promise<WuxReviewConfig> {
   return parseConfig(text);
 }
 
-async function repoRoot(): Promise<string | undefined> {
+export async function repoRoot(): Promise<string | undefined> {
   const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
   return code === 0 && out.trim() !== "" ? out.trim() : undefined;

@@ -1,5 +1,5 @@
 import { startMcpServer } from "./mcp/server";
-import { loadConfig as defaultLoadConfig } from "./review/config";
+import { loadConfig as defaultLoadConfig, repoRoot } from "./review/config";
 import { resolveCheck, runCheck as defaultRunCheck } from "./review/check";
 import type { VerdictEnvelope } from "./review/consolidate";
 import { DEFAULT_LENSES, type Lens } from "./review/lenses";
@@ -117,6 +117,15 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
   if (argv.some((a) => a === "-v" || a === "--version")) {
     process.stdout.write(`${VERSION}\n`);
     return 0;
+  }
+
+  // Normal commands resolve repository configuration and/or review a repository
+  // diff. Refuse to guess a target outside a checkout before any review leg can
+  // start. Help, version, recovery, and session cleanup remain available there.
+  if (argv[0] !== "reconcile" && !argv.includes("--end-session")) {
+    if (await repoRoot() === undefined) {
+      throw new WuxReviewError(`not a git checkout: ${process.cwd()}`);
+    }
   }
 
   // `mcp` is a subcommand, recognized only in first position: serve the

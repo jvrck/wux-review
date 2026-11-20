@@ -13,6 +13,10 @@ wux-review mcp                Start the MCP server (the review_diff tool).
 wux-review --help | --version
 ```
 
+Except for `--help`, `--version`, `--end-session`, and `reconcile`, run
+`wux-review` from inside a git checkout. It otherwise exits with `not a git
+checkout: <cwd>` before starting either reviewer.
+
 ## `check`
 `wux-review check` runs the repo's deterministic build/test gate and exits with
 its status (`0` pass, non-zero fail). The command(s) come from the `check:` key in
@@ -31,9 +35,9 @@ check:
 ## Configuration (.wux-review.yml)
 
 Configuration is optional. wux-review looks for `.wux-review.yml` at the git
-repository root, or in the current directory when it is not running in a git
-repository. A missing file uses the defaults. `--lenses` takes precedence over
-the file's `lenses` value, which takes precedence over the default lens set.
+repository root. A missing file uses the defaults. `--lenses` takes precedence
+over the file's `lenses` value, which takes precedence over the default lens
+set.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
