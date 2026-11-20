@@ -1,3 +1,5 @@
+import { realpath } from "node:fs/promises";
+import { isAbsolute, relative } from "node:path";
 import { z } from "zod";
 import { WuxReviewError } from "../runtime/errors";
 
@@ -107,5 +109,15 @@ export async function loadConfig(dir?: string): Promise<WuxReviewConfig> {
 export async function repoRoot(): Promise<string | undefined> {
   const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  return code === 0 && out.trim() !== "" ? out.trim() : undefined;
+  if (code !== 0 || out.trim() === "") {
+    return undefined;
+  }
+  const [root, cwd] = await Promise.all([
+    realpath(out.trim()).catch(() => out.trim()),
+    realpath(process.cwd()).catch(() => process.cwd()),
+  ]);
+  const pathFromRoot = relative(root, cwd);
+  return pathFromRoot === "" || (!isAbsolute(pathFromRoot) && pathFromRoot !== ".." && !pathFromRoot.startsWith("../"))
+    ? root
+    : undefined;
 }

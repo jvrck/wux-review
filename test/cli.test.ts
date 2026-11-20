@@ -366,6 +366,26 @@ describe("review pipeline (in-process, injected reviewers)", () => {
     }
   });
 
+  test("the checkout guard accepts a linked worktree", async () => {
+    const repo = gitRepo();
+    const worktree = mkdtempSync(join(tmpdir(), "wuxr-worktree-"));
+    rmSync(worktree, { recursive: true, force: true });
+    try {
+      const added = Bun.spawnSync(["git", "worktree", "add", "--detach", worktree, "HEAD"], { cwd: repo });
+      expect(added.exitCode).toBe(0);
+
+      const result = await callCli(["HEAD~1", "--direct", "--json"], worktree, {
+        runReviewers: fakeReviewers([], []),
+      });
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout).verdict).toBe("approve");
+    } finally {
+      Bun.spawnSync(["git", "worktree", "remove", "--force", worktree], { cwd: repo });
+      rmSync(worktree, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   test("a clean review prints the approve envelope and exits 0 (--json)", async () => {
     const dir = gitRepo();
     try {

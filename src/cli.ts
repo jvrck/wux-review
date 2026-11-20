@@ -119,13 +119,25 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
     return 0;
   }
 
-  // Normal commands resolve repository configuration and/or review a repository
-  // diff. Refuse to guess a target outside a checkout before any review leg can
-  // start. Help, version, recovery, and session cleanup remain available there.
-  if (argv[0] !== "reconcile" && !argv.includes("--end-session")) {
-    if (await repoRoot() === undefined) {
-      throw new WuxReviewError(`not a git checkout: ${process.cwd()}`);
+  if (argv[0] === "reconcile") {
+    const parsed = parseReconcileArgs(argv.slice(1));
+    const outcome = await (deps.reconcileReview ?? defaultReconcileReview)(parsed.reviewId);
+    if ("kind" in outcome) {
+      process.stdout.write(parsed.json
+        ? `${JSON.stringify(outcome)}\n`
+        : `wux-review: observable round ${outcome.reviewId} terminal cleanup completed; the original ${outcome.state} round remains terminal and replacement reviews are unblocked\n`
+      );
+      return 0;
     }
+    process.stdout.write(`${parsed.json ? renderJson(outcome) : renderHuman(outcome)}\n`);
+    return exitCodeFor(outcome);
+  }
+
+  // These subcommands operate on repository data, so validate the checkout
+  // before their handlers run. Help/version returned above; reconciliation is
+  // deliberately handled above because it recovers recorded external state.
+  if (argv[0] === "mcp" || argv[0] === "skills" || argv[0] === "check") {
+    await requireGitCheckout();
   }
 
   // `mcp` is a subcommand, recognized only in first position: serve the
@@ -157,21 +169,17 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
     return await (deps.runCheck ?? defaultRunCheck)(commands);
   }
 
-  if (argv[0] === "reconcile") {
-    const parsed = parseReconcileArgs(argv.slice(1));
-    const outcome = await (deps.reconcileReview ?? defaultReconcileReview)(parsed.reviewId);
-    if ("kind" in outcome) {
-      process.stdout.write(parsed.json
-        ? `${JSON.stringify(outcome)}\n`
-        : `wux-review: observable round ${outcome.reviewId} terminal cleanup completed; the original ${outcome.state} round remains terminal and replacement reviews are unblocked\n`
-      );
-      return 0;
-    }
-    process.stdout.write(`${parsed.json ? renderJson(outcome) : renderHuman(outcome)}\n`);
-    return exitCodeFor(outcome);
-  }
-
   const opts = parseReviewArgs(argv);
+
+  const cleanupOnly = opts.endSession === true
+    && opts.ref === undefined
+    && opts.pr === undefined
+    && opts.lenses === undefined
+    && opts.postToPr === undefined
+    && opts.refutations === undefined;
+  if (!cleanupOnly) {
+    await requireGitCheckout();
+  }
 
   // `--end-session` is a cleanup-and-exit: stop the two sessions and do nothing else.
   if (opts.endSession) {
@@ -273,6 +281,12 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
     }
   }
   return exitCodeFor(envelope);
+}
+
+async function requireGitCheckout(): Promise<void> {
+  if (await repoRoot() === undefined) {
+    throw new WuxReviewError(`not a git checkout: ${process.cwd()}`);
+  }
 }
 
 function renderEndSessionReport(report: EndSessionReport): string {

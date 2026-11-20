@@ -13,9 +13,9 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ### Fixed
 
-- **Checkout validation.** Commands that operate on a review now fail before
-  either reviewer starts when run outside a git checkout, instead of guessing a
-  target from the current directory.
+- **Checkout validation.** Review commands, including `wux-review mcp`, now
+  fail before either reviewer starts when run outside a git checkout, instead
+  of guessing a target from the current directory.
 
 ## 2026.11.17
 
