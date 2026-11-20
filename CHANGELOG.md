@@ -11,6 +11,11 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **Pinned pull-request reviews.** `--expect-head` waits for a pushed PR head
+  and records the reviewed SHA in JSON, PR comments, and posted-verdict output.
+
 ## 2026.11.17
 
 ### Fixed

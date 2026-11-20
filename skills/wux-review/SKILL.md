@@ -12,7 +12,8 @@ and reviewer model pins in `.wux-review.yml` at the repository root. See
 for the full format.
 
 ## 1. Resolve the target
-- A pull request: `--pr <n>`.
+- A pull request: `--pr <n>`; after a push, use `--expect-head <sha>` to wait
+  for and record that PR head.
 - A ref, a range, or the working tree: pass `<ref>` (e.g. `HEAD~1`, `main..HEAD`), or omit it to review the uncommitted working tree.
 
 ## 2. Run the review

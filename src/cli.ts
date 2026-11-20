@@ -56,6 +56,7 @@ Usage:
 
 Options:
   --pr <n>            Review pull request <n> instead of a local ref.
+  --expect-head <sha> Require a PR's current head to match this commit before reviewing.
   --lenses <list>     Comma-separated lens set override. Default set: ${DEFAULT_LENSES.map((lens) => lens.name).join(", ")}.
                       "default" expands to that set.
   --post-to-pr <n>    Also post the consolidated findings as a comment on PR <n>.

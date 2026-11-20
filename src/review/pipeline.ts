@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { run as defaultRun, type Run } from "../runtime/exec";
 import { loadConfig as defaultLoadConfig } from "./config";
 import { consolidate, findingKey, type VerdictEnvelope } from "./consolidate";
 import { getDiff as defaultGetDiff, type ReviewDiff } from "./diff";
@@ -68,6 +69,7 @@ export interface ReviewDeps {
   getDiff?: (target: Target) => Promise<ReviewDiff>;
   observableRoundStore?: ObservableRoundStore;
   acquireObservableLock?: (reviewId: string) => Promise<() => Promise<void>>;
+  run?: Run;
 }
 
 export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Promise<VerdictEnvelope> {
@@ -79,7 +81,11 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   const loadConfig = deps.loadConfig ?? defaultLoadConfig;
   const config = await loadConfig();
   const lenses = resolveLenses({ cliLenses: input.lenses, config });
-  const target = resolveTarget({ ref: input.ref, pr: input.pr, expectedHead: input.expectedHead });
+  const expectedHead = input.pr === undefined
+    ? input.expectedHead
+    : await resolveExpectedHead(input.pr, input.expectedHead, deps.run ?? defaultRun);
+  const target = resolveTarget({ ref: input.ref, pr: input.pr, expectedHead });
+  if (target.kind === "pr") target.headWaitMs = config.prHeadWaitMs;
   const getDiff = deps.getDiff ?? defaultGetDiff;
   // The diff is the FULL cumulative base...head change for the target, computed
   // identically regardless of session state (#94): a `--session` re-review is fed
@@ -362,6 +368,27 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   } finally {
     await releaseObservableLock?.();
   }
+}
+
+async function resolveExpectedHead(pr: number, explicit: string | undefined, run: Run): Promise<string | undefined> {
+  if (explicit !== undefined) return explicit;
+  const view = await run(["gh", "pr", "view", String(pr), "--json", "headRefName,headRefOid"]);
+  if (view.code !== 0) {
+    process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
+    return undefined;
+  }
+  let prHead: { headRefName?: unknown };
+  try { prHead = JSON.parse(view.stdout) as { headRefName?: unknown }; } catch {
+    process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
+    return undefined;
+  }
+  const branch = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
+  const head = await run(["git", "rev-parse", "HEAD"]);
+  if (typeof prHead.headRefName === "string" && branch.code === 0 && head.code === 0 && branch.stdout.trim() === prHead.headRefName && /^[0-9a-f]{40,64}$/i.test(head.stdout.trim())) {
+    return head.stdout.trim();
+  }
+  process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
+  return undefined;
 }
 
 function throwIfObservableReviewAborted(

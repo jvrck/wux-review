@@ -29,12 +29,14 @@ const reviewerSchema = z
 // treats as a successful no-op and would silently disable the gate — is rejected.
 const checkCommand = z.string().trim().min(1, "check command must not be blank");
 const checkSchema = z.union([checkCommand, z.array(checkCommand).min(1, "must list at least one check command")]);
+const headWaitSchema = z.number().int().min(0).max(60_000).optional();
 
 export const configSchema = z
   .object({
     lenses: z.array(z.string().min(1)).min(1, "must list at least one lens").optional(),
     extra_lenses: z.array(lensSchema).optional(),
     check: checkSchema.optional(),
+    pr_head_wait_ms: headWaitSchema,
     reviewers: z
       .object({
         claude: reviewerSchema.optional(),
@@ -54,6 +56,7 @@ export interface WuxReviewConfig {
   extraLenses?: { name: string; prompt: string }[];
   // Normalized to a command list; a bare string in the YAML becomes `[string]`.
   check?: string[];
+  prHeadWaitMs?: number;
   reviewers?: { claude?: ReviewerConfig; codex?: ReviewerConfig };
 }
 
@@ -81,6 +84,7 @@ export function parseConfig(text: string): WuxReviewConfig {
     lenses: data.lenses,
     extraLenses: data.extra_lenses,
     check: data.check === undefined ? undefined : Array.isArray(data.check) ? data.check : [data.check],
+    prHeadWaitMs: data.pr_head_wait_ms,
     reviewers: data.reviewers,
   };
 }
