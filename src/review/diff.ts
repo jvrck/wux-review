@@ -30,24 +30,26 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const command = ["gh", "pr", "diff", String(target.pr)];
-      const result = await run(command);
-      if (result.code !== 0) {
-        if (isLargePrDiffError(result.stderr)) {
-          return localPrDiff(target.pr, run);
+      let expected = target.expectedHead;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const command = ["gh", "pr", "diff", String(target.pr)];
+        const result = await run(command);
+        if (result.code !== 0) {
+          if (isLargePrDiffError(result.stderr)) {
+            return localPrDiff(target.pr, expected, run);
+          }
+          throw captureError(command, result.stderr, result.code);
         }
-        throw captureError(command, result.stderr, result.code);
-      }
-      const diff = result.stdout;
-      const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
-      if (target.expectedHead !== undefined) {
+        const diff = result.stdout;
+        const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
+        if (expected === undefined) return finalize(diff, splitLines(names));
         const head = await readPrHead(target.pr, run);
-        if (head !== target.expectedHead) {
-          throw headMismatch(target.pr, head, target.expectedHead);
+        if (head === expected) return { ...finalize(diff, splitLines(names)), head };
+        if (attempt === 1) throw headMismatch(target.pr, head, expected);
+        expected = head;
+        await waitForExpectedHead(target.pr, expected, target.headWaitMs ?? 60_000, run);
         }
-        return { ...finalize(diff, splitLines(names)), head };
-      }
-      return finalize(diff, splitLines(names));
+      throw new Error("unreachable");
     }
     case "range": {
       // A three-dot `base...HEAD` range (target.ts) is the full cumulative diff of
@@ -123,8 +125,11 @@ function isLargePrDiffError(stderr: string): boolean {
   return /the diff exceeded the maximum number of (?:files|lines)|HTTP 406:\s*Diff too large/i.test(stderr);
 }
 
-async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
+async function localPrDiff(pr: number, expectedHead: string | undefined, run: Run): Promise<ReviewDiff> {
   const refs = await getPrRefs(pr, run);
+  if (expectedHead !== undefined && refs.headRefOid !== expectedHead) {
+    throw headMismatch(pr, refs.headRefOid, expectedHead);
+  }
   const git = await createFallbackGit(pr, run);
   for (const sha of [refs.baseRefOid, refs.headRefOid]) {
     await requireLocalCommit(pr, refs, sha, git);
@@ -168,7 +173,7 @@ async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   process.stderr.write(
     `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
-  return reviewDiff;
+  return expectedHead === undefined ? reviewDiff : { ...reviewDiff, head: expectedHead };
 }
 
 async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
