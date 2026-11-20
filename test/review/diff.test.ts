@@ -30,6 +30,7 @@ const PR_REFS = {
   headRefOid: "89abcdef0123456789abcdef0123456789abcdef",
   baseRefName: "main",
 };
+const EXPECTED_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
 const BASE_BLOB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HEAD_BLOB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const GITLINK_ONE = "cccccccccccccccccccccccccccccccccccccccc";
@@ -170,6 +171,39 @@ function largePrFallbackRun(
 }
 
 describe("getDiff", () => {
+  test("waits for an expected PR head before reading its diff", async () => {
+    const heads = [PR_REFS.headRefOid, PR_REFS.headRefOid, EXPECTED_HEAD];
+    const calls: string[] = [];
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      calls.push(key);
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: heads.shift() ?? EXPECTED_HEAD }));
+      }
+      if (key === "gh pr diff 42") return ok(SAMPLE_DIFF);
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+
+    const result = await getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD } as never, run);
+    expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"], head: EXPECTED_HEAD });
+    expect(calls.filter((call) => call === "gh pr view 42 --json headRefOid")).toHaveLength(4);
+  });
+
+  test("never reads a PR diff when its expected head does not arrive", async () => {
+    let diffRead = false;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") return ok(JSON.stringify({ headRefOid: PR_REFS.headRefOid }));
+      if (key.startsWith("gh pr diff")) diffRead = true;
+      throw new Error(`unexpected command: ${key}`);
+    };
+
+    await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD, headWaitMs: 0 } as never, run))
+      .rejects.toThrow(`PR #42 head is ${PR_REFS.headRefOid}, expected ${EXPECTED_HEAD}; push may not have landed`);
+    expect(diffRead).toBe(false);
+  });
+
   test("pr target shells out to gh pr diff", async () => {
     const run = mockRun({
       "gh pr diff 42": ok(SAMPLE_DIFF),
