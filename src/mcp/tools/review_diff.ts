@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { postToPr as defaultPostToPr } from "../../review/post";
+import { isObjectId, normalizeObjectId } from "../../review/object-id";
 import { runReview } from "../../review/pipeline";
 import { renderJson } from "../../review/render";
 import type { McpDeps } from "../server";
@@ -17,26 +18,32 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
       title: "dual-review a diff",
       description:
         "Run the Claude+Codex dual review of a code change and return the consolidated verdict envelope " +
-        "(verdict, must_fix, nice_fix, nits, reviewers, session). Reviews a git ref/range, the working tree " +
+        "(verdict, must_fix, nice_fix, nits, reviewers, session, and PR head). Reviews a git ref/range, the working tree " +
         "(omit ref), or a pull request (pr); optionally posts the findings to a PR. Judges only — it never " +
         "edits code; the worker owns the fix loop and merge gate.",
       inputSchema: {
         ref: z.string().min(1).optional(),
         pr: z.number().int().positive().optional(),
+        expect_head: z.string()
+          .refine(isObjectId, "expect_head must be a valid full commit SHA")
+          .transform(normalizeObjectId)
+          .optional(),
         lenses: z.array(z.string().min(1)).min(1).optional(),
         post_to_pr: z.number().int().positive().optional(),
         session: z.string().min(1).optional(),
       },
     },
-    async ({ ref, pr, lenses, post_to_pr, session }) => {
+    async ({ ref, pr, expect_head, lenses, post_to_pr, session }) => {
       const envelope = await runReview(
-        { ref, pr, lenses, session },
+        { ref, pr, expectedHead: expect_head, lenses, session },
         {
           runReviewers: deps.runReviewers,
           loadConfig: deps.loadConfig,
           backends: deps.backends,
           observableRoundStore: deps.observableRoundStore,
           acquireObservableLock: deps.acquireObservableLock,
+          getDiff: deps.getDiff,
+          run: deps.run,
         },
       );
 

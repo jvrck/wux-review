@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { runReview, type ReviewDeps } from "../../src/review/pipeline";
+import { getDiff } from "../../src/review/diff";
 import { reconcileReview } from "../../src/review/observable-recovery";
 import type {
   ObservableRoundRecord,
@@ -8,6 +9,7 @@ import type {
 import type { Backend } from "../../src/review/reviewers";
 import type { SessionStore } from "../../src/review/session-state";
 import type { SessionState } from "../../src/review/types";
+import type { Run } from "../../src/runtime/exec";
 
 const report = (findings: unknown[]): string => "```json\n" + JSON.stringify({ findings }) + "\n```";
 
@@ -57,6 +59,276 @@ function deps(claude: Backend, codex: Backend, store: SessionStore): ReviewDeps 
 describe("runReview", () => {
   test("rejects a ref combined with a pr (mutually exclusive targets)", async () => {
     await expect(runReview({ ref: "HEAD~1", pr: 7 }, { loadConfig: async () => ({}) })).rejects.toThrow("not both");
+  });
+
+  test("an injected PR diff source does not shell out to gh without an injected runner", async () => {
+    const originalPath = process.env.PATH;
+    const originalWrite = process.stderr.write;
+    const writes: string[] = [];
+    let capturedTarget: unknown;
+    process.env.PATH = "";
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"], head: "a".repeat(40) };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(writes).toEqual([]);
+  });
+
+  test("defaults the expected PR head to local HEAD when checked out on its branch", async () => {
+    const localHead = "a".repeat(40);
+    let capturedTarget: unknown;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return { code: 0, stdout: JSON.stringify({ isCrossRepository: false, headRefName: "feature" }), stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "feature\n", stderr: "" };
+      if (key === "git rev-parse HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    const result = await runReview(
+      { pr: 42, direct: true },
+      {
+        loadConfig: async () => ({ prHeadWaitMs: 1234 }),
+        run,
+        getDiff: async (target) => {
+          capturedTarget = target;
+          return { diff: "diff\n", files: ["x.ts"], head: localHead };
+        },
+        runReviewers: async () => ({
+          sessionId: "s",
+          claude: { reviewer: "claude", verdict: "approve", findings: [] },
+          codex: { reviewer: "codex", verdict: "approve", findings: [] },
+        }),
+      },
+    );
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: localHead, headWaitMs: 1234 });
+    expect(result.head).toBe(localHead);
+  });
+
+  test("does not default to a local HEAD with an invalid object-id length", async () => {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let capturedTarget: unknown;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return { code: 0, stdout: JSON.stringify({ isCrossRepository: false, headRefName: "feature" }), stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "feature\n", stderr: "" };
+      if (key === "git rev-parse HEAD") return { code: 0, stdout: `${"a".repeat(41)}\n`, stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          run,
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"] };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
+  });
+
+  test("does not default to local HEAD for a fork PR with the same branch name", async () => {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let capturedTarget: unknown;
+    let localLookups = 0;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            headRefName: "feature",
+            headRefOid: "b".repeat(40),
+            isCrossRepository: true,
+          }),
+          stderr: "",
+        };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") {
+        localLookups++;
+        return { code: 0, stdout: "feature\n", stderr: "" };
+      }
+      if (key === "git rev-parse HEAD") {
+        localLookups++;
+        return { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      }
+      throw new Error(`unexpected command: ${key}`);
+    };
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          run,
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"] };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(localLookups).toBe(0);
+    expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
+  });
+
+  test("leaves the PR head unpinned off-branch and prints one stderr note", async () => {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let capturedTarget: unknown;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return { code: 0, stdout: JSON.stringify({ isCrossRepository: false, headRefName: "feature" }), stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "other\n", stderr: "" };
+      if (key === "git rev-parse HEAD") return { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          run,
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"] };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
+  });
+
+  test("does not launch reviewers when a pinned PR moves during diff acquisition", async () => {
+    const expected = "a".repeat(40);
+    const moved = "b".repeat(40);
+    const heads = [expected, moved];
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefOid: heads.shift() ?? moved }), stderr: "" };
+      }
+      if (key === "gh pr diff 42") return { code: 0, stdout: "diff\n", stderr: "" };
+      if (key === "gh pr diff 42 --name-only") return { code: 0, stdout: "x.ts\n", stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    let launched = false;
+    await expect(runReview(
+      { pr: 42, expectedHead: expected, direct: true },
+      {
+        loadConfig: async () => ({}),
+        getDiff: (target) => getDiff(target, run),
+        runReviewers: async () => {
+          launched = true;
+          throw new Error("reviewers must not launch");
+        },
+      },
+    )).rejects.toThrow(
+      `PR #42 head moved from ${expected} to ${moved} during the review fetch; re-run the review`,
+    );
+    expect(launched).toBe(false);
+  });
+
+  test("does not launch reviewers when the configured PR head wait expires", async () => {
+    const expected = "a".repeat(40);
+    const actual = "b".repeat(40);
+    let now = 0;
+    let launched = false;
+    const run: Run = async (cmd) => {
+      if (cmd.join(" ") === "gh pr view 42 --json headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefOid: actual }), stderr: "" };
+      }
+      throw new Error(`unexpected command: ${cmd.join(" ")}`);
+    };
+    await expect(runReview(
+      { pr: 42, expectedHead: expected, direct: true },
+      {
+        loadConfig: async () => ({ prHeadWaitMs: 500 }),
+        getDiff: (target) => getDiff(target, run, {
+          now: () => now,
+          sleep: async (ms) => { now += ms; },
+        }),
+        runReviewers: async () => {
+          launched = true;
+          throw new Error("reviewers must not launch");
+        },
+      },
+    )).rejects.toThrow(`PR #42 head is ${actual}, expected ${expected}; push may not have landed`);
+    expect(now).toBe(500);
+    expect(launched).toBe(false);
   });
 
   // #100: the envelope carries a 1-based round, sourced from and persisted to the

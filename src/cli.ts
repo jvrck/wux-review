@@ -3,8 +3,9 @@ import { loadConfig as defaultLoadConfig } from "./review/config";
 import { resolveCheck, runCheck as defaultRunCheck } from "./review/check";
 import type { VerdictEnvelope } from "./review/consolidate";
 import { DEFAULT_LENSES, type Lens } from "./review/lenses";
+import { isObjectId, normalizeObjectId } from "./review/object-id";
 import { postToPr as defaultPostToPr, type PostResult } from "./review/post";
-import { runReview } from "./review/pipeline";
+import { runReview, type ReviewDeps } from "./review/pipeline";
 import {
   reconcileReview as defaultReconcileReview,
   type ReconcileOutcome,
@@ -34,6 +35,8 @@ export interface CliDeps {
   loadConfig?: typeof defaultLoadConfig;
   runCheck?: (commands: string[]) => Promise<number>;
   reconcileReview?: (reviewId: string) => Promise<ReconcileOutcome>;
+  getDiff?: ReviewDeps["getDiff"];
+  run?: ReviewDeps["run"];
 }
 
 // The documented v1 surface. Handlers for the review pipeline and the `mcp`
@@ -56,6 +59,7 @@ Usage:
 
 Options:
   --pr <n>            Review pull request <n> instead of a local ref.
+  --expect-head <sha> Require a PR's current head to match this commit before reviewing.
   --lenses <list>     Comma-separated lens set override. Default set: ${DEFAULT_LENSES.map((lens) => lens.name).join(", ")}.
                       "default" expands to that set.
   --post-to-pr <n>    Also post the consolidated findings as a comment on PR <n>.
@@ -84,6 +88,7 @@ Config:
 export interface ReviewOptions {
   ref?: string;
   pr?: number;
+  expectedHead?: string;
   lenses?: string[];
   postToPr?: number;
   session?: string;
@@ -222,13 +227,14 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       {
         ref: opts.ref,
         pr: opts.pr,
+        expectedHead: opts.expectedHead,
         lenses: opts.lenses,
         session: opts.session,
         direct: opts.direct,
         refutations,
         signal: interrupt?.signal,
       },
-      { runReviewers: deps.runReviewers },
+      { runReviewers: deps.runReviewers, getDiff: deps.getDiff, run: deps.run },
     );
   } finally {
     if (interrupt !== undefined) {
@@ -256,7 +262,8 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
       if (posted.length > 0) {
         const round = posted[0]!.round;
         const legs = posted.map((p) => `${p.reviewer} ${p.url}`).join(" · ");
-        process.stderr.write(`wux-review: verdict posted (round ${round}) — ${legs}\n`);
+        const head = envelope.head === undefined ? "" : `, head ${envelope.head.slice(0, 12)}`;
+        process.stderr.write(`wux-review: verdict posted (round ${round}${head}) — ${legs}\n`);
       }
     } catch (err) {
       const message = err instanceof WuxReviewError ? err.message : (err as Error).message;
@@ -310,6 +317,9 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
     switch (arg) {
       case "--pr":
         opts.pr = intValue(argv, ++i, "--pr");
+        break;
+      case "--expect-head":
+        opts.expectedHead = objectIdValue(argv, ++i, "--expect-head");
         break;
       case "--lenses": {
         const lenses = value(argv, ++i, "--lenses")
@@ -374,6 +384,9 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
   if (opts.ref !== undefined && opts.pr !== undefined) {
     throw new WuxReviewError("provide either a <ref> or --pr <n>, not both");
   }
+  if (opts.expectedHead !== undefined && opts.pr === undefined) {
+    throw new WuxReviewError("--expect-head requires --pr <n>");
+  }
   // A bare invocation (neither <ref> nor --pr) is the documented "working tree"
   // review target — the default mode, resolved in #4. An empty options set is
   // therefore valid, not a usage error.
@@ -417,4 +430,12 @@ function intValue(argv: string[], i: number, flag: string): number {
     throw new WuxReviewError(`${flag} requires a positive integer, got "${raw}"`);
   }
   return n;
+}
+
+function objectIdValue(argv: string[], i: number, flag: string): string {
+  const raw = value(argv, i, flag);
+  if (!isObjectId(raw)) {
+    throw new WuxReviewError(`${flag} requires a valid full commit SHA, got "${raw}"`);
+  }
+  return normalizeObjectId(raw);
 }

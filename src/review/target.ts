@@ -3,14 +3,14 @@
 // layer is trivially testable.
 
 export type Target =
-  | { kind: "pr"; pr: number }
+  | { kind: "pr"; pr: number; expectedHead?: string; headWaitMs?: number }
   | { kind: "range"; range: string }
   | { kind: "worktree" };
 
 // `parseReviewArgs` already guarantees `ref` and `pr` are not both set.
-export function resolveTarget(input: { ref?: string; pr?: number }): Target {
+export function resolveTarget(input: { ref?: string; pr?: number; expectedHead?: string }): Target {
   if (input.pr !== undefined) {
-    return { kind: "pr", pr: input.pr };
+    return { kind: "pr", pr: input.pr, expectedHead: input.expectedHead };
   }
   const ref = input.ref;
   if (ref === undefined) {

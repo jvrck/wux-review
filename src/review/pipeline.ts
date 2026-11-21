@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { run as defaultRun, type Run } from "../runtime/exec";
 import { loadConfig as defaultLoadConfig } from "./config";
 import { consolidate, findingKey, type VerdictEnvelope } from "./consolidate";
 import { getDiff as defaultGetDiff, type ReviewDiff } from "./diff";
 import { resolveLenses, type Lens } from "./lenses";
+import { isObjectId, normalizeObjectId } from "./object-id";
 import {
   runReviewers as defaultRunReviewers,
   type DualReviewResult,
@@ -41,6 +43,7 @@ class SessionStateConflictError extends WuxReviewError {}
 export interface ReviewInput {
   ref?: string;
   pr?: number;
+  expectedHead?: string;
   lenses?: string[];
   session?: string;
   cwd?: string;
@@ -67,18 +70,29 @@ export interface ReviewDeps {
   getDiff?: (target: Target) => Promise<ReviewDiff>;
   observableRoundStore?: ObservableRoundStore;
   acquireObservableLock?: (reviewId: string) => Promise<() => Promise<void>>;
+  run?: Run;
 }
 
 export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Promise<VerdictEnvelope> {
   if (input.ref !== undefined && input.pr !== undefined) {
     throw new WuxReviewError("provide either a ref or pr, not both");
   }
+  if (input.expectedHead !== undefined && input.pr === undefined) {
+    throw new WuxReviewError("expected head requires a PR target");
+  }
   throwIfObservableReviewAborted(input);
 
   const loadConfig = deps.loadConfig ?? defaultLoadConfig;
   const config = await loadConfig();
   const lenses = resolveLenses({ cliLenses: input.lenses, config });
-  const target = resolveTarget({ ref: input.ref, pr: input.pr });
+  const skipInjectedDiffLookup = input.expectedHead === undefined
+    && deps.getDiff !== undefined
+    && deps.run === undefined;
+  const expectedHead = input.pr === undefined || skipInjectedDiffLookup
+    ? input.expectedHead
+    : await resolveExpectedHead(input.pr, input.expectedHead, deps.run ?? defaultRun);
+  const target = resolveTarget({ ref: input.ref, pr: input.pr, expectedHead });
+  if (target.kind === "pr") target.headWaitMs = config.prHeadWaitMs;
   const getDiff = deps.getDiff ?? defaultGetDiff;
   // The diff is the FULL cumulative base...head change for the target, computed
   // identically regardless of session state (#94): a `--session` re-review is fed
@@ -86,7 +100,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   // round — so it can never false-flag earlier-commit content (e.g. tests) as
   // missing. Prior findings (loaded below) ride along the prompt as context only;
   // they do not scope this diff.
-  const { diff } = await getDiff(target);
+  const { diff, head } = await getDiff(target);
   throwIfObservableReviewAborted(input);
 
   // An explicit session id (CLI `--session`, MCP `session`) means session mode:
@@ -287,6 +301,7 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
       claude,
       codex,
       evidence,
+      head,
     };
     if (!observable) {
       return await finalizeReviewRound(finalization, store);
@@ -362,6 +377,35 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   }
 }
 
+async function resolveExpectedHead(pr: number, explicit: string | undefined, run: Run): Promise<string | undefined> {
+  if (explicit !== undefined) {
+    if (!isObjectId(explicit)) {
+      throw new WuxReviewError("expected head must be a valid full commit SHA");
+    }
+    return normalizeObjectId(explicit);
+  }
+  const view = await run(["gh", "pr", "view", String(pr), "--json", "isCrossRepository,headRefName"]);
+  if (view.code === 0) {
+    let prHead: { isCrossRepository?: unknown; headRefName?: unknown } | undefined;
+    try {
+      prHead = JSON.parse(view.stdout) as { isCrossRepository?: unknown; headRefName?: unknown };
+    } catch {
+      prHead = undefined;
+    }
+    if (prHead?.isCrossRepository === false && typeof prHead.headRefName === "string") {
+      const branch = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
+      if (branch.code === 0 && branch.stdout.trim() === prHead.headRefName) {
+        const head = await run(["git", "rev-parse", "HEAD"]);
+        if (head.code === 0 && isObjectId(head.stdout.trim())) {
+          return normalizeObjectId(head.stdout.trim());
+        }
+      }
+    }
+  }
+  process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
+  return undefined;
+}
+
 function throwIfObservableReviewAborted(
   input: ReviewInput,
   phase = "before child launch",
@@ -382,6 +426,7 @@ export interface FinalizeReviewRoundInput {
   claude: ReviewResult;
   codex: ReviewResult;
   evidence?: { claude: ReviewRoundEvidence["claude"]; codex: ReviewRoundEvidence["codex"] };
+  head?: string;
 }
 
 export interface PreparedReviewRound {
@@ -415,6 +460,7 @@ export function prepareReviewRoundFinalization(
 
   const envelope = consolidate(claudeResult, codexResult, input.sessionId);
   envelope.round = input.round;
+  envelope.head = input.head;
 
   const sessionState = input.sessionMode
     ? {

@@ -40,6 +40,13 @@ reviewers:
     expect(parseConfig("check:\n  - ruff check\n  - pytest -q\n")).toEqual({ check: ["ruff check", "pytest -q"] });
   });
 
+  test("parses and bounds the PR head wait timeout", () => {
+    expect(parseConfig("pr_head_wait_ms: 1250\n")).toEqual({ prHeadWaitMs: 1250 });
+    expect(parseConfig("pr_head_wait_ms: 0\n")).toEqual({ prHeadWaitMs: 0 });
+    expect(() => parseConfig("pr_head_wait_ms: -1\n")).toThrow(".wux-review.yml");
+    expect(() => parseConfig("pr_head_wait_ms: 60001\n")).toThrow(".wux-review.yml");
+  });
+
   test("omits check entirely when absent (so the default applies)", () => {
     expect(parseConfig("lenses:\n  - correctness\n").check).toBeUndefined();
   });

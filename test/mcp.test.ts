@@ -8,6 +8,7 @@ import { createReviewMcpServer, type McpDeps } from "../src/mcp/server";
 import type { ObservableRoundRecord, ObservableRoundStore } from "../src/review/observable-lifecycle";
 import type { BackendOptions, Reviewers } from "../src/review/reviewers";
 import type { Finding, ReviewerName, ReviewResult } from "../src/review/types";
+import type { Target } from "../src/review/target";
 
 const REPORT = '```json\n{"findings":[]}\n```';
 
@@ -266,6 +267,42 @@ describe("review_diff MCP server", () => {
       const result = await client.callTool({ name: "review_diff", arguments: { ref: "HEAD~1", pr: 7 } });
       expect(result.isError).toBe(true);
       expect(textOf(result)).toContain("not both");
+    });
+  });
+
+  test("expect_head reaches the shared PR pipeline and invalid SHAs are rejected", async () => {
+    const head = "a".repeat(40);
+    const mixedCaseHead = "aA".repeat(20);
+    let target: Target | undefined;
+    const deps = {
+      loadConfig: async () => ({}),
+      runReviewers: fakeReviewers([], []),
+      getDiff: async (received: Target) => {
+        target = received;
+        return { diff: "diff\n", files: ["x.ts"], head };
+      },
+    } as McpDeps & { getDiff: (target: Target) => Promise<{ diff: string; files: string[]; head: string }> };
+    await withServer(deps, async (client) => {
+      const result = await client.callTool({
+        name: "review_diff",
+        arguments: { pr: 42, expect_head: mixedCaseHead },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(textOf(result)).head).toBe(head);
+      expect(target).toEqual({ kind: "pr", pr: 42, expectedHead: head, headWaitMs: undefined });
+
+      const invalid = await client.callTool({
+        name: "review_diff",
+        arguments: { pr: 42, expect_head: "abc123" },
+      });
+      expect(invalid.isError).toBe(true);
+
+      const withoutPr = await client.callTool({
+        name: "review_diff",
+        arguments: { ref: "HEAD~1", expect_head: head },
+      });
+      expect(withoutPr.isError).toBe(true);
+      expect(textOf(withoutPr)).toContain("expected head requires a PR target");
     });
   });
 });

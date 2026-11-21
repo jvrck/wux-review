@@ -1,11 +1,23 @@
 import { WuxReviewError } from "../runtime/errors";
 import { run as defaultRun, type Run, type RunResult } from "../runtime/exec";
+import { isObjectId, normalizeObjectId } from "./object-id";
 import type { Target } from "./target";
 
 export interface ReviewDiff {
   diff: string;
   files: string[];
+  head?: string;
 }
+
+export interface DiffClock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+const defaultClock: DiffClock = {
+  now: Date.now,
+  sleep: Bun.sleep,
+};
 
 // Fetch the unified diff + changed-file list for a resolved target. `run` is
 // injectable so the git/gh boundary can be mocked in tests.
@@ -19,24 +31,35 @@ export interface ReviewDiff {
 // can never lose content from an earlier commit (#94). The prior-round findings a
 // re-review threads into the prompt are context only (see prompt.ts / pipeline.ts);
 // they do not narrow this diff.
-export async function getDiff(target: Target, run: Run = defaultRun): Promise<ReviewDiff> {
+export async function getDiff(
+  target: Target,
+  run: Run = defaultRun,
+  clock: DiffClock = defaultClock,
+): Promise<ReviewDiff> {
   switch (target.kind) {
     case "pr": {
+      const pinnedHead = target.expectedHead === undefined
+        ? undefined
+        : normalizeObjectId(target.expectedHead);
+      if (pinnedHead !== undefined) {
+        await waitForExpectedHead(target.pr, pinnedHead, target.headWaitMs ?? 60_000, run, clock);
+      }
       // `gh pr diff <n>` is the full base...head diff for the PR — the complete
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      const command = ["gh", "pr", "diff", String(target.pr)];
-      const result = await run(command);
-      if (result.code !== 0) {
-        if (isLargePrDiffError(result.stderr)) {
-          return localPrDiff(target.pr, run);
-        }
-        throw captureError(command, result.stderr, result.code);
+      const before = pinnedHead ?? await readPrHead(target.pr, run);
+      const first = await fetchPrDiff(target.pr, pinnedHead, run);
+      const after = await readPrHead(target.pr, run);
+      if (after === before) return { ...first, head: before };
+      if (pinnedHead !== undefined) {
+        throw headMoved(target.pr, pinnedHead, after);
       }
-      const diff = result.stdout;
-      const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
-      return finalize(diff, splitLines(names));
+
+      const second = await fetchPrDiff(target.pr, undefined, run);
+      const finalHead = await readPrHead(target.pr, run);
+      if (finalHead !== after) throw headMoved(target.pr, after, finalHead);
+      return { ...second, head: after };
     }
     case "range": {
       // A three-dot `base...HEAD` range (target.ts) is the full cumulative diff of
@@ -71,6 +94,53 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
   }
 }
 
+async function fetchPrDiff(pr: number, expectedHead: string | undefined, run: Run): Promise<ReviewDiff> {
+  const command = ["gh", "pr", "diff", String(pr)];
+  const result = await run(command);
+  if (result.code !== 0) {
+    if (isLargePrDiffError(result.stderr)) return localPrDiff(pr, expectedHead, run);
+    throw captureError(command, result.stderr, result.code);
+  }
+  const names = await capture(run, ["gh", "pr", "diff", String(pr), "--name-only"]);
+  return finalize(result.stdout, splitLines(names));
+}
+
+async function waitForExpectedHead(
+  pr: number,
+  expected: string,
+  waitMs: number,
+  run: Run,
+  clock: DiffClock,
+): Promise<void> {
+  const deadline = clock.now() + Math.max(0, waitMs);
+  let actual = await readPrHead(pr, run);
+  while (actual !== expected) {
+    if (clock.now() >= deadline) throw headMismatch(pr, actual, expected);
+    await clock.sleep(Math.min(250, Math.max(1, deadline - clock.now())));
+    actual = await readPrHead(pr, run);
+  }
+}
+
+async function readPrHead(pr: number, run: Run): Promise<string> {
+  const raw = await capture(run, ["gh", "pr", "view", String(pr), "--json", "headRefOid"]);
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new WuxReviewError(`gh pr view ${pr}: invalid JSON response`); }
+  if (typeof value !== "object" || value === null || !isObjectId((value as { headRefOid?: unknown }).headRefOid)) {
+    throw new WuxReviewError(`gh pr view ${pr}: missing valid head commit information`);
+  }
+  return normalizeObjectId((value as { headRefOid: string }).headRefOid);
+}
+
+function headMismatch(pr: number, actual: string, expected: string): WuxReviewError {
+  return new WuxReviewError(`PR #${pr} head is ${actual}, expected ${expected}; push may not have landed`);
+}
+
+function headMoved(pr: number, from: string, to: string): WuxReviewError {
+  return new WuxReviewError(
+    `PR #${pr} head moved from ${from} to ${to} during the review fetch; re-run the review`,
+  );
+}
+
 interface PrRefs {
   baseRefOid: string;
   headRefOid: string;
@@ -88,8 +158,11 @@ function isLargePrDiffError(stderr: string): boolean {
   return /the diff exceeded the maximum number of (?:files|lines)|HTTP 406:\s*Diff too large/i.test(stderr);
 }
 
-async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
+async function localPrDiff(pr: number, expectedHead: string | undefined, run: Run): Promise<ReviewDiff> {
   const refs = await getPrRefs(pr, run);
+  if (expectedHead !== undefined && refs.headRefOid !== expectedHead) {
+    throw headMoved(pr, expectedHead, refs.headRefOid);
+  }
   const git = await createFallbackGit(pr, run);
   for (const sha of [refs.baseRefOid, refs.headRefOid]) {
     await requireLocalCommit(pr, refs, sha, git);
@@ -133,7 +206,7 @@ async function localPrDiff(pr: number, run: Run): Promise<ReviewDiff> {
   process.stderr.write(
     `wux-review: PR #${pr} exceeds GitHub's diff size limit; reviewing ${range} from local git\n`,
   );
-  return reviewDiff;
+  return expectedHead === undefined ? reviewDiff : { ...reviewDiff, head: expectedHead };
 }
 
 async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
@@ -161,11 +234,12 @@ async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
   ) {
     throw new WuxReviewError(`gh pr view ${pr}: missing valid base or head commit information`);
   }
-  return value as PrRefs;
-}
-
-function isObjectId(value: unknown): value is string {
-  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+  const refs = value as PrRefs;
+  return {
+    ...refs,
+    baseRefOid: normalizeObjectId(refs.baseRefOid),
+    headRefOid: normalizeObjectId(refs.headRefOid),
+  };
 }
 
 async function createFallbackGit(pr: number, run: Run): Promise<FallbackGit> {
