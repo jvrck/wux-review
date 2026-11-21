@@ -136,7 +136,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
   // These subcommands operate on repository data, so validate the checkout
   // before their handlers run. Help/version returned above; reconciliation is
   // deliberately handled above because it recovers recorded external state.
-  if (argv[0] === "mcp" || argv[0] === "skills" || argv[0] === "check") {
+  if (argv[0] === "mcp" || argv[0] === "check") {
     await requireGitCheckout();
   }
 

@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 import { z } from "zod";
 import { WuxReviewError } from "../runtime/errors";
 
@@ -120,16 +120,19 @@ export async function repoRoot(): Promise<string | undefined> {
     stderr: "pipe",
     env: environment,
   });
-  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  if (code !== 0 || out.trim() === "") {
-    return undefined;
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  if (code !== 0) {
+    if (/not a git repository/i.test(err)) return undefined;
+    throw new WuxReviewError(err.trim() || "git rev-parse --show-toplevel failed");
   }
+  const reportedRoot = out.replace(/\r?\n$/, "");
+  if (reportedRoot === "") return undefined;
   const [root, cwd] = await Promise.all([
-    realpath(out.trim()).catch(() => out.trim()),
+    realpath(reportedRoot).catch(() => reportedRoot),
     realpath(process.cwd()).catch(() => process.cwd()),
   ]);
   const pathFromRoot = relative(root, cwd);
-  return pathFromRoot === "" || (!isAbsolute(pathFromRoot) && pathFromRoot !== ".." && !pathFromRoot.startsWith("../"))
+  return pathFromRoot === "" || (!isAbsolute(pathFromRoot) && pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`))
     ? root
     : undefined;
 }

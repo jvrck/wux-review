@@ -13,7 +13,8 @@ wux-review mcp                Start the MCP server (the review_diff tool).
 wux-review --help | --version
 ```
 
-Except for `--help`, `--version`, `--end-session`, and `reconcile`, run
+Except for `--help`, `--version`, a bare `--end-session`, `reconcile`, and
+`skills show`, run
 `wux-review` from inside a git checkout. It otherwise exits with `not a git
 checkout: <cwd>` before starting either reviewer.
 
