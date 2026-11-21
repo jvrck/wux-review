@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -274,6 +274,33 @@ describe("PR1 run layout", () => {
 
     expect(await Bun.file(run.path).exists()).toBe(false);
     expect((await stat(outside)).isDirectory()).toBe(true);
+  });
+
+  test("T-swap-to-directory-before-rename: a replaced directory is never recursively deleted", async () => {
+    const stateDir = await stateRoot();
+    const run = await createRunDirectory({
+      stateDir,
+      kind: "claude",
+      createdMs: 1_700_000_000_000,
+      deadlineMs: 1_700_000_900_000,
+      legMaxMs: 900_000,
+    });
+    const victim = join(stateDir, "victim");
+    const sentinel = join(run.path, "keep");
+    await mkdir(victim);
+    await writeFile(join(victim, "keep"), "keep");
+
+    await removeOwnedDir(run.path, {
+      stateDir,
+      tempDir: tmpdir(),
+      beforeRename: async (path) => {
+        await rm(path, { recursive: true });
+        await rename(victim, path);
+      },
+    });
+
+    expect(await Bun.file(sentinel).exists()).toBe(true);
+    expect((await lstat(run.path)).isDirectory()).toBe(true);
   });
 
   test("T-run-wrong-uid: a run belonging to another uid is kept", async () => {
