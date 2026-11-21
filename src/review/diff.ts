@@ -53,12 +53,12 @@ export async function getDiff(
       const after = await readPrHead(target.pr, run);
       if (after === before) return { ...first, head: before };
       if (pinnedHead !== undefined) {
-        throw headMismatch(target.pr, after, pinnedHead);
+        throw headMoved(target.pr, pinnedHead, after);
       }
 
       const second = await fetchPrDiff(target.pr, undefined, run);
       const finalHead = await readPrHead(target.pr, run);
-      if (finalHead !== after) throw headMismatch(target.pr, finalHead, after);
+      if (finalHead !== after) throw headMoved(target.pr, after, finalHead);
       return { ...second, head: after };
     }
     case "range": {
@@ -135,6 +135,12 @@ function headMismatch(pr: number, actual: string, expected: string): WuxReviewEr
   return new WuxReviewError(`PR #${pr} head is ${actual}, expected ${expected}; push may not have landed`);
 }
 
+function headMoved(pr: number, from: string, to: string): WuxReviewError {
+  return new WuxReviewError(
+    `PR #${pr} head moved from ${from} to ${to} during the review fetch; re-run the review`,
+  );
+}
+
 interface PrRefs {
   baseRefOid: string;
   headRefOid: string;
@@ -155,7 +161,7 @@ function isLargePrDiffError(stderr: string): boolean {
 async function localPrDiff(pr: number, expectedHead: string | undefined, run: Run): Promise<ReviewDiff> {
   const refs = await getPrRefs(pr, run);
   if (expectedHead !== undefined && refs.headRefOid !== expectedHead) {
-    throw headMismatch(pr, refs.headRefOid, expectedHead);
+    throw headMoved(pr, expectedHead, refs.headRefOid);
   }
   const git = await createFallbackGit(pr, run);
   for (const sha of [refs.baseRefOid, refs.headRefOid]) {
