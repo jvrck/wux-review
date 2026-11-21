@@ -3,6 +3,7 @@ import { loadConfig as defaultLoadConfig } from "./review/config";
 import { resolveCheck, runCheck as defaultRunCheck } from "./review/check";
 import type { VerdictEnvelope } from "./review/consolidate";
 import { DEFAULT_LENSES, type Lens } from "./review/lenses";
+import { isObjectId, normalizeObjectId } from "./review/object-id";
 import { postToPr as defaultPostToPr, type PostResult } from "./review/post";
 import { runReview, type ReviewDeps } from "./review/pipeline";
 import {
@@ -433,8 +434,8 @@ function intValue(argv: string[], i: number, flag: string): number {
 
 function objectIdValue(argv: string[], i: number, flag: string): string {
   const raw = value(argv, i, flag);
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(raw)) {
+  if (!isObjectId(raw)) {
     throw new WuxReviewError(`${flag} requires a valid full commit SHA, got "${raw}"`);
   }
-  return raw;
+  return normalizeObjectId(raw);
 }

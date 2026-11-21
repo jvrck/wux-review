@@ -386,17 +386,17 @@ describe("review pipeline (in-process, injected reviewers)", () => {
     const head = "abcdef0123456789abcdef0123456789abcdef01";
     let target: unknown;
     try {
-      const deps = {
+      const deps: CliDeps = {
         runReviewers: fakeReviewers([], []),
-        getDiff: async (received: unknown) => {
+        getDiff: async (received) => {
           target = received;
           return { diff: "diff\n", files: ["x.ts"], head };
         },
-        postToPr: async (_pr: number, env: { round?: number }) => [
+        postToPr: async (_pr, env) => [
           { reviewer: "claude" as const, url: "https://github.com/o/r/pull/42#c1", round: env.round ?? 1 },
           { reviewer: "codex" as const, url: "https://github.com/o/r/pull/42#c2", round: env.round ?? 1 },
         ],
-      } as CliDeps & { getDiff: () => Promise<{ diff: string; files: string[]; head: string }> };
+      };
       const { code, stdout, stderr } = await callCli(
         ["--pr", "42", "--expect-head", head.toUpperCase(), "--json", "--post-to-pr", "42", "--direct"],
         dir,

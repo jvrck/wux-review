@@ -4,6 +4,7 @@ import { loadConfig as defaultLoadConfig } from "./config";
 import { consolidate, findingKey, type VerdictEnvelope } from "./consolidate";
 import { getDiff as defaultGetDiff, type ReviewDiff } from "./diff";
 import { resolveLenses, type Lens } from "./lenses";
+import { isObjectId, normalizeObjectId } from "./object-id";
 import {
   runReviewers as defaultRunReviewers,
   type DualReviewResult,
@@ -374,7 +375,12 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
 }
 
 async function resolveExpectedHead(pr: number, explicit: string | undefined, run: Run): Promise<string | undefined> {
-  if (explicit !== undefined) return explicit;
+  if (explicit !== undefined) {
+    if (!isObjectId(explicit)) {
+      throw new WuxReviewError("expected head must be a valid full commit SHA");
+    }
+    return normalizeObjectId(explicit);
+  }
   const view = await run(["gh", "pr", "view", String(pr), "--json", "headRefName,headRefOid"]);
   if (view.code !== 0) {
     process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
@@ -387,8 +393,8 @@ async function resolveExpectedHead(pr: number, explicit: string | undefined, run
   }
   const branch = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
   const head = await run(["git", "rev-parse", "HEAD"]);
-  if (typeof prHead.headRefName === "string" && branch.code === 0 && head.code === 0 && branch.stdout.trim() === prHead.headRefName && /^[0-9a-f]{40,64}$/i.test(head.stdout.trim())) {
-    return head.stdout.trim();
+  if (typeof prHead.headRefName === "string" && branch.code === 0 && head.code === 0 && branch.stdout.trim() === prHead.headRefName && isObjectId(head.stdout.trim())) {
+    return normalizeObjectId(head.stdout.trim());
   }
   process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
   return undefined;

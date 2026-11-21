@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { postToPr as defaultPostToPr } from "../../review/post";
+import { isObjectId, normalizeObjectId } from "../../review/object-id";
 import { runReview } from "../../review/pipeline";
 import { renderJson } from "../../review/render";
 import type { McpDeps } from "../server";
@@ -23,7 +24,10 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
       inputSchema: {
         ref: z.string().min(1).optional(),
         pr: z.number().int().positive().optional(),
-        expect_head: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i, "expect_head must be a valid full commit SHA").optional(),
+        expect_head: z.string()
+          .refine(isObjectId, "expect_head must be a valid full commit SHA")
+          .transform(normalizeObjectId)
+          .optional(),
         lenses: z.array(z.string().min(1)).min(1).optional(),
         post_to_pr: z.number().int().positive().optional(),
         session: z.string().min(1).optional(),

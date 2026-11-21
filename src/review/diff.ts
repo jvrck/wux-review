@@ -1,5 +1,6 @@
 import { WuxReviewError } from "../runtime/errors";
 import { run as defaultRun, type Run, type RunResult } from "../runtime/exec";
+import { isObjectId, normalizeObjectId } from "./object-id";
 import type { Target } from "./target";
 
 export interface ReviewDiff {
@@ -37,7 +38,9 @@ export async function getDiff(
 ): Promise<ReviewDiff> {
   switch (target.kind) {
     case "pr": {
-      const pinnedHead = target.expectedHead;
+      const pinnedHead = target.expectedHead === undefined
+        ? undefined
+        : normalizeObjectId(target.expectedHead);
       if (pinnedHead !== undefined) {
         await waitForExpectedHead(target.pr, pinnedHead, target.headWaitMs ?? 60_000, run, clock);
       }
@@ -125,7 +128,7 @@ async function readPrHead(pr: number, run: Run): Promise<string> {
   if (typeof value !== "object" || value === null || !isObjectId((value as { headRefOid?: unknown }).headRefOid)) {
     throw new WuxReviewError(`gh pr view ${pr}: missing valid head commit information`);
   }
-  return (value as { headRefOid: string }).headRefOid;
+  return normalizeObjectId((value as { headRefOid: string }).headRefOid);
 }
 
 function headMismatch(pr: number, actual: string, expected: string): WuxReviewError {
@@ -225,11 +228,12 @@ async function getPrRefs(pr: number, run: Run): Promise<PrRefs> {
   ) {
     throw new WuxReviewError(`gh pr view ${pr}: missing valid base or head commit information`);
   }
-  return value as PrRefs;
-}
-
-function isObjectId(value: unknown): value is string {
-  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value);
+  const refs = value as PrRefs;
+  return {
+    ...refs,
+    baseRefOid: normalizeObjectId(refs.baseRefOid),
+    headRefOid: normalizeObjectId(refs.headRefOid),
+  };
 }
 
 async function createFallbackGit(pr: number, run: Run): Promise<FallbackGit> {
