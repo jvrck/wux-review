@@ -8,6 +8,16 @@ export interface ReviewDiff {
   head?: string;
 }
 
+export interface DiffClock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+const defaultClock: DiffClock = {
+  now: Date.now,
+  sleep: Bun.sleep,
+};
+
 // Fetch the unified diff + changed-file list for a resolved target. `run` is
 // injectable so the git/gh boundary can be mocked in tests.
 //
@@ -20,11 +30,15 @@ export interface ReviewDiff {
 // can never lose content from an earlier commit (#94). The prior-round findings a
 // re-review threads into the prompt are context only (see prompt.ts / pipeline.ts);
 // they do not narrow this diff.
-export async function getDiff(target: Target, run: Run = defaultRun): Promise<ReviewDiff> {
+export async function getDiff(
+  target: Target,
+  run: Run = defaultRun,
+  clock: DiffClock = defaultClock,
+): Promise<ReviewDiff> {
   switch (target.kind) {
     case "pr": {
       if (target.expectedHead !== undefined) {
-        await waitForExpectedHead(target.pr, target.expectedHead, target.headWaitMs ?? 60_000, run);
+        await waitForExpectedHead(target.pr, target.expectedHead, target.headWaitMs ?? 60_000, run, clock);
       }
       // `gh pr diff <n>` is the full base...head diff for the PR — the complete
       // cumulative change across every commit on the branch, so a re-review sees
@@ -47,8 +61,7 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
         if (head === expected) return { ...finalize(diff, splitLines(names)), head };
         if (attempt === 1) throw headMismatch(target.pr, head, expected);
         expected = head;
-        await waitForExpectedHead(target.pr, expected, target.headWaitMs ?? 60_000, run);
-        }
+      }
       throw new Error("unreachable");
     }
     case "range": {
@@ -84,12 +97,18 @@ export async function getDiff(target: Target, run: Run = defaultRun): Promise<Re
   }
 }
 
-async function waitForExpectedHead(pr: number, expected: string, waitMs: number, run: Run): Promise<void> {
-  const deadline = Date.now() + Math.max(0, waitMs);
+async function waitForExpectedHead(
+  pr: number,
+  expected: string,
+  waitMs: number,
+  run: Run,
+  clock: DiffClock,
+): Promise<void> {
+  const deadline = clock.now() + Math.max(0, waitMs);
   let actual = await readPrHead(pr, run);
   while (actual !== expected) {
-    if (Date.now() >= deadline) throw headMismatch(pr, actual, expected);
-    await Bun.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+    if (clock.now() >= deadline) throw headMismatch(pr, actual, expected);
+    await clock.sleep(Math.min(250, Math.max(1, deadline - clock.now())));
     actual = await readPrHead(pr, run);
   }
 }

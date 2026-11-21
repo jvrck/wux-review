@@ -17,13 +17,13 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
       title: "dual-review a diff",
       description:
         "Run the Claude+Codex dual review of a code change and return the consolidated verdict envelope " +
-        "(verdict, must_fix, nice_fix, nits, reviewers, session). Reviews a git ref/range, the working tree " +
+        "(verdict, must_fix, nice_fix, nits, reviewers, session, and PR head). Reviews a git ref/range, the working tree " +
         "(omit ref), or a pull request (pr); optionally posts the findings to a PR. Judges only — it never " +
         "edits code; the worker owns the fix loop and merge gate.",
       inputSchema: {
         ref: z.string().min(1).optional(),
         pr: z.number().int().positive().optional(),
-        expect_head: z.string().min(1).optional(),
+        expect_head: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i, "expect_head must be a valid full commit SHA").optional(),
         lenses: z.array(z.string().min(1)).min(1).optional(),
         post_to_pr: z.number().int().positive().optional(),
         session: z.string().min(1).optional(),
@@ -38,6 +38,8 @@ export function registerReviewDiff(server: McpServer, deps: McpDeps): void {
           backends: deps.backends,
           observableRoundStore: deps.observableRoundStore,
           acquireObservableLock: deps.acquireObservableLock,
+          getDiff: deps.getDiff,
+          run: deps.run,
         },
       );
 

@@ -312,6 +312,23 @@ describe("getDiff", () => {
     expect(calls.some((call) => call.includes(PR_REFS.headRefOid))).toBe(false);
   });
 
+  test("large-PR fallback rejects metadata for a head other than the expected SHA", async () => {
+    let gitCalled = false;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") return ok(JSON.stringify({ headRefOid: EXPECTED_HEAD }));
+      if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
+      if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
+      if (key.startsWith("git ")) gitCalled = true;
+      throw new Error(`unexpected command: ${key}`);
+    };
+
+    await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run)).rejects.toThrow(
+      `PR #42 head is ${PR_REFS.headRefOid}, expected ${EXPECTED_HEAD}; push may not have landed`,
+    );
+    expect(gitCalled).toBe(false);
+  });
+
   test("pr target shells out to gh pr diff", async () => {
     const run = mockRun({
       "gh pr diff 42": ok(SAMPLE_DIFF),

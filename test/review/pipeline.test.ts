@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { runReview, type ReviewDeps } from "../../src/review/pipeline";
+import { getDiff } from "../../src/review/diff";
 import { reconcileReview } from "../../src/review/observable-recovery";
 import type {
   ObservableRoundRecord,
@@ -136,20 +137,60 @@ describe("runReview", () => {
   });
 
   test("does not launch reviewers when PR diff acquisition fails after a second head move", async () => {
+    const expected = "a".repeat(40);
+    const moved = "b".repeat(40);
+    const movedAgain = "c".repeat(40);
+    const heads = [expected, moved, movedAgain];
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefOid: heads.shift() ?? movedAgain }), stderr: "" };
+      }
+      if (key === "gh pr diff 42") return { code: 0, stdout: "diff\n", stderr: "" };
+      if (key === "gh pr diff 42 --name-only") return { code: 0, stdout: "x.ts\n", stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
     let launched = false;
     await expect(runReview(
-      { pr: 42, expectedHead: "a".repeat(40), direct: true },
+      { pr: 42, expectedHead: expected, direct: true },
       {
         loadConfig: async () => ({}),
-        getDiff: async () => {
-          throw new Error(`PR #42 head is ${"c".repeat(40)}, expected ${"b".repeat(40)}; push may not have landed`);
-        },
+        getDiff: (target) => getDiff(target, run),
         runReviewers: async () => {
           launched = true;
           throw new Error("reviewers must not launch");
         },
       },
-    )).rejects.toThrow("push may not have landed");
+    )).rejects.toThrow(`PR #42 head is ${movedAgain}, expected ${moved}; push may not have landed`);
+    expect(launched).toBe(false);
+  });
+
+  test("does not launch reviewers when the configured PR head wait expires", async () => {
+    const expected = "a".repeat(40);
+    const actual = "b".repeat(40);
+    let now = 0;
+    let launched = false;
+    const run: Run = async (cmd) => {
+      if (cmd.join(" ") === "gh pr view 42 --json headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefOid: actual }), stderr: "" };
+      }
+      throw new Error(`unexpected command: ${cmd.join(" ")}`);
+    };
+    await expect(runReview(
+      { pr: 42, expectedHead: expected, direct: true },
+      {
+        loadConfig: async () => ({ prHeadWaitMs: 500 }),
+        getDiff: (target) => getDiff(target, run, {
+          now: () => now,
+          sleep: async (ms) => { now += ms; },
+        }),
+        runReviewers: async () => {
+          launched = true;
+          throw new Error("reviewers must not launch");
+        },
+      },
+    )).rejects.toThrow(`PR #42 head is ${actual}, expected ${expected}; push may not have landed`);
+    expect(now).toBe(500);
     expect(launched).toBe(false);
   });
 

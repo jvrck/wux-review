@@ -25,7 +25,8 @@ wux-review <target> --json --post-to-pr <n>
 For a review → fix → re-review loop, pick a stable `--session <id>` up front and pass it on **every** run, including the first — that is what makes each re-review context-aware (see step 3). Use an id **unique to this review** (e.g. `<repo>-pr<n>`): ids share a per-host namespace, so a bare `<n>` could collide with another repo's loop and cross-feed its prior findings. A one-off review with no loop can omit it.
 
 `wux-review` spawns two equal, independent reviewers (Claude + Codex), feeds each the same diff and lens set, and returns one consolidated verdict:
-`{ verdict, must_fix, nice_fix, nits, reviewers, session }`. Exit code: `0` approve, `2` block, `1` error.
+`{ verdict, must_fix, nice_fix, nits, reviewers, session, head }` (`head` is
+present for pinned PR reviews). Exit code: `0` approve, `2` block, `1` error.
 
 When the caller is a shell script or an agent running with `set -e`, capture the
 status after preserving stdout. Exit `2` means **review blocked**, not a crashed
@@ -56,7 +57,7 @@ PY
 ```
 
 ## 3. Act on the verdict
-- **`block`** (either reviewer raised a must-fix): apply the must-fix items — *you* own the fix; `wux-review` never edits code — then re-review with the **same** stable `--session <id>` you used on the first run: `wux-review <target> --session <id>`. Each re-review is context-aware — the leg is fed its own prior-round findings (persisted from the previous run *under that id*) and reports only issues still visible in the current diff, so a resolved finding is not re-raised and an approving leg does not flip on a subjective point. (State is persisted only for runs that pass `--session`, so the first run must already carry the id for the first re-review to be incremental.) Repeat until `approve`. End the session with `wux-review --session <id> --end-session` (this also clears the persisted prior-round state).
+- **`block`** (either reviewer raised a must-fix): apply the must-fix items — *you* own the fix; `wux-review` never edits code — then re-review with the **same** stable `--session <id>` you used on the first run. After pushing, pass the pushed commit as `--expect-head <sha>`; wux-review waits for that PR head and never reviews the stale one. Each re-review is context-aware — the leg is fed its own prior-round findings (persisted from the previous run *under that id*) and reports only issues still visible in the current diff, so a resolved finding is not re-raised and an approving leg does not flip on a subjective point. (State is persisted only for runs that pass `--session`, so the first run must already carry the id for the first re-review to be incremental.) Repeat until `approve`. End the session with `wux-review --session <id> --end-session` (this also clears the persisted prior-round state).
 - **A persistent false-positive blocker** — a leg that re-raises the *same* wrong must-fix across rounds despite being wrong — is not a reason to give up or merge unreviewed. Falsify it with a runnable counter-repro (a `node -e` one-liner, a passing CI note), write those into a `--refutations <file>` (a JSON array of `{ reviewer, file, line, lens, finding, evidence }` matching the finding), and pass `--refutations <file>` on the next `--session` re-review. The finding is recorded in the session's refutation ledger and shown to the leg each round; if the leg re-raises it **without a new repro**, it is demoted to advisory and tagged `persistent-unproven` (demoted, never deleted — it stays visible), and the verdict unblocks. A blocker that *does* carry a valid repro is never demoted. This never auto-approves: a genuinely new must-fix still blocks.
 - **`approve`**: report it.
 

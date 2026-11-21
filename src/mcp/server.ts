@@ -5,6 +5,7 @@ import type { Lens } from "../review/lenses";
 import type { PostResult } from "../review/post";
 import type { DualReviewResult, Reviewers, RunReviewersOptions } from "../review/reviewers";
 import type { ObservableRoundStore } from "../review/observable-lifecycle";
+import type { ReviewDeps } from "../review/pipeline";
 import { VERSION } from "../version";
 import { registerReviewDiff } from "./tools/review_diff";
 
@@ -21,6 +22,8 @@ export interface McpDeps {
   // tool ignores the return value (it only cares that the post ran).
   postToPr?: (pr: number, envelope: VerdictEnvelope) => Promise<PostResult[] | void>;
   loadConfig?: typeof loadConfig;
+  getDiff?: ReviewDeps["getDiff"];
+  run?: ReviewDeps["run"];
 }
 
 const INSTRUCTIONS =

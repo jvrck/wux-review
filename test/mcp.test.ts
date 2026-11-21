@@ -295,6 +295,13 @@ describe("review_diff MCP server", () => {
         arguments: { pr: 42, expect_head: "abc123" },
       });
       expect(invalid.isError).toBe(true);
+
+      const withoutPr = await client.callTool({
+        name: "review_diff",
+        arguments: { ref: "HEAD~1", expect_head: head },
+      });
+      expect(withoutPr.isError).toBe(true);
+      expect(textOf(withoutPr)).toContain("expected head requires a PR target");
     });
   });
 });

@@ -4,7 +4,7 @@ import { resolveCheck, runCheck as defaultRunCheck } from "./review/check";
 import type { VerdictEnvelope } from "./review/consolidate";
 import { DEFAULT_LENSES, type Lens } from "./review/lenses";
 import { postToPr as defaultPostToPr, type PostResult } from "./review/post";
-import { runReview } from "./review/pipeline";
+import { runReview, type ReviewDeps } from "./review/pipeline";
 import {
   reconcileReview as defaultReconcileReview,
   type ReconcileOutcome,
@@ -34,6 +34,8 @@ export interface CliDeps {
   loadConfig?: typeof defaultLoadConfig;
   runCheck?: (commands: string[]) => Promise<number>;
   reconcileReview?: (reviewId: string) => Promise<ReconcileOutcome>;
+  getDiff?: ReviewDeps["getDiff"];
+  run?: ReviewDeps["run"];
 }
 
 // The documented v1 surface. Handlers for the review pipeline and the `mcp`
@@ -231,7 +233,7 @@ async function dispatch(argv: string[], deps: CliDeps): Promise<number> {
         refutations,
         signal: interrupt?.signal,
       },
-      { runReviewers: deps.runReviewers },
+      { runReviewers: deps.runReviewers, getDiff: deps.getDiff, run: deps.run },
     );
   } finally {
     if (interrupt !== undefined) {
@@ -316,7 +318,7 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
         opts.pr = intValue(argv, ++i, "--pr");
         break;
       case "--expect-head":
-        opts.expectedHead = value(argv, ++i, "--expect-head");
+        opts.expectedHead = objectIdValue(argv, ++i, "--expect-head");
         break;
       case "--lenses": {
         const lenses = value(argv, ++i, "--lenses")
@@ -381,6 +383,9 @@ export function parseReviewArgs(argv: string[]): ReviewOptions {
   if (opts.ref !== undefined && opts.pr !== undefined) {
     throw new WuxReviewError("provide either a <ref> or --pr <n>, not both");
   }
+  if (opts.expectedHead !== undefined && opts.pr === undefined) {
+    throw new WuxReviewError("--expect-head requires --pr <n>");
+  }
   // A bare invocation (neither <ref> nor --pr) is the documented "working tree"
   // review target — the default mode, resolved in #4. An empty options set is
   // therefore valid, not a usage error.
@@ -424,4 +429,12 @@ function intValue(argv: string[], i: number, flag: string): number {
     throw new WuxReviewError(`${flag} requires a positive integer, got "${raw}"`);
   }
   return n;
+}
+
+function objectIdValue(argv: string[], i: number, flag: string): string {
+  const raw = value(argv, i, flag);
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(raw)) {
+    throw new WuxReviewError(`${flag} requires a valid full commit SHA, got "${raw}"`);
+  }
+  return raw;
 }

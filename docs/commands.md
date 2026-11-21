@@ -40,6 +40,7 @@ the file's `lenses` value, which takes precedence over the default lens set.
 | `lenses` | Non-empty list of lens names | `correctness`, `edge-cases`, `security`, `regression`, `clarity` | Replaces the active lens set. Use `default` inside the list to expand to that default set. |
 | `extra_lenses` | List of `{ name, prompt }` objects | None | Defines repository-specific lenses that can be selected by `lenses` or `--lenses`. `default` is reserved for the built-in alias. |
 | `check` | Non-blank command string or non-empty list of command strings | `bun run typecheck && bun test` | The ordered deterministic commands run by `wux-review check`. |
+| `pr_head_wait_ms` | Integer from `0` through `60000` | `60000` | Maximum bounded wait for an expected PR head before the review fails without launching either reviewer. |
 | `reviewers` (`reviewers.<leg>.model`) | Optional string, where `<leg>` is `claude` or `codex` | No model pins | Pins the model for either reviewer leg. |
 
 Unknown keys and blank `check` commands are configuration errors. For example:
@@ -64,7 +65,7 @@ reviewers:
 | Flag | Meaning |
 |------|---------|
 | `--pr <n>` | Review PR `<n>` instead of a local ref (mutually exclusive with `<ref>`). If GitHub declines an oversized diff, wux-review uses the local `base...head` range when its commits and merge base are already available. It never fetches automatically; a raw preflight and one local batch check confirm required range objects, including a missing tree named by the preflight, before it prints the fetch hint. Gitlinks are not checked in the superproject object store, and corrupt-object diagnostics remain Git errors. Partial clones require Git 2.45 or newer and use `--no-lazy-fetch` to avoid downloading promised objects. Older Git fails before traversal. |
-| `--expect-head <sha>` | Wait up to 60 seconds for the PR head to reach this SHA before fetching its diff. Set `.wux-review.yml` `pr_head_wait_ms` to shorten that bounded wait. |
+| `--expect-head <sha>` | With `--pr`, wait up to 60 seconds for the PR head to reach this full SHA before fetching its diff. Set `.wux-review.yml` `pr_head_wait_ms` to shorten that bounded wait. If omitted while the checkout is on the PR branch, local `HEAD` is used; otherwise stderr notes that GitHub's current head will be reviewed without an expectation. |
 | `--lenses <list>` | Comma-separated lens-set override. The default set is `correctness`, `edge-cases`, `security`, `regression`, `clarity`; `default` expands to that set. |
 | `--post-to-pr <n>` | Also post the consolidated findings as a PR comment on PR `<n>`. |
 | `--session <id>` | Use a stable id for the run (names each leg's temp files); re-review with the same id reviews the current diff fresh. |
@@ -149,11 +150,12 @@ so a new comment never appears to signal a completed re-review. Each comment
 instead opens with a visible header line:
 
 ```
-**Dual-review (codex) — round 2 · updated 2026-07-24T04:51:24Z · verdict: must-fix**
+**Dual-review (codex) — round 2 · head abcdef012345 · updated 2026-07-24T04:51:24Z · verdict: must-fix**
 ```
 
 Detect a new verdict by the **round number** (or the comment `updatedAt` / the
-header timestamp), never by the comment count. `round` comes from the
+header timestamp), never by the comment count. The `head` is the reviewed PR
+commit (shortened in the header and full in `--json`). `round` comes from the
 `--session` state (round 1 on the first review of a session or a one-shot;
 incremented each re-review), and the header `verdict` is that leg's own
 `clean`/`must-fix`. The HTML marker keys are unchanged, so marker-grep tooling is
@@ -163,7 +165,7 @@ On completion the CLI prints a positive posted-verdict signal to **stderr** (so 
 never corrupts the machine-readable `--json` verdict on stdout):
 
 ```
-wux-review: verdict posted (round 2) — claude <url> · codex <url>
+wux-review: verdict posted (round 2, head abcdef012345) — claude <url> · codex <url>
 ```
 
 so a driving session gets a definitive "verdict posted (round N)" with both
