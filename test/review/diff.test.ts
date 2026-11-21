@@ -14,6 +14,9 @@ const z = (...parts: string[]): RunResult => ok(parts.map((p) => `${p}\0`).join(
 function mockRun(table: Record<string, RunResult>): Run {
   return async (cmd: string[], stdin?: string) => {
     const key = cmd.join(" ");
+    if (key === "gh pr view 42 --json headRefOid") {
+      return ok(JSON.stringify({ headRefOid: PR_REFS.headRefOid }));
+    }
     if (key === "git cat-file --batch-check") {
       return ok((stdin ?? "").split("\n").filter(Boolean).map((objectId) => `${objectId} blob 4\n`).join(""));
     }
@@ -88,6 +91,9 @@ function git(root: string, args: string[]): string {
 function localGitRun(root: string, refs: typeof PR_REFS, calls?: string[][]): Run {
   return async (cmd, stdin?: string) => {
     calls?.push(cmd);
+    if (cmd.join(" ") === "gh pr view 42 --json headRefOid") {
+      return ok(JSON.stringify({ headRefOid: refs.headRefOid }));
+    }
     if (cmd.join(" ") === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
     if (cmd.join(" ") === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") {
       return ok(JSON.stringify(refs));
@@ -116,6 +122,9 @@ function partialCloneFallbackRun(version: string): { batchInputs: string[]; call
     run: async (cmd, stdin?: string) => {
       calls.push(cmd);
       const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: PR_REFS.headRefOid }));
+      }
       if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
       if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
       if (key === "git config --get extensions.partialClone") return ok("origin\n");
@@ -369,7 +378,7 @@ describe("getDiff", () => {
     for (const stderr of [MAXIMUM_FILES_RESPONSE, DIRECT_TOO_LARGE_RESPONSE, MAXIMUM_LINES_RESPONSE]) {
       const { result, stderr: notice } = await captureStderr(() =>
         getDiff({ kind: "pr", pr: 42 }, largePrFallbackRun(stderr)));
-      expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
+      expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"], head: PR_REFS.headRefOid });
       expect(notice).toContain("exceeds GitHub's diff size limit");
       expect(notice).toContain(`reviewing ${PR_REFS.baseRefOid}...${PR_REFS.headRefOid} from local git`);
     }
@@ -462,8 +471,12 @@ describe("getDiff", () => {
 
   test("partial clones on Git 2.45 run every fallback command with --no-lazy-fetch", async () => {
     const { batchInputs, calls, run } = partialCloneFallbackRun("2.45.0");
-    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"] });
-    const traversal = calls.slice(4);
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({
+      diff: SAMPLE_DIFF,
+      files: ["x.ts"],
+      head: PR_REFS.headRefOid,
+    });
+    const traversal = calls.filter((command) => command[0] === "git" && command[1] === "--no-lazy-fetch");
     expect(traversal.every((command) => command[0] === "git" && command[1] === "--no-lazy-fetch")).toBe(true);
     expect(traversal.map((command) => command.join(" ")).sort()).toEqual([
       ["git", "--no-lazy-fetch", "cat-file", "-e", `${PR_REFS.baseRefOid}^{commit}`],
@@ -481,6 +494,9 @@ describe("getDiff", () => {
     const batchInputs: string[] = [];
     const run: Run = async (cmd, stdin?: string) => {
       const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: PR_REFS.headRefOid }));
+      }
       if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
       if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
       if (key === "git config --get extensions.partialClone") return fail("", 1);
@@ -505,6 +521,7 @@ describe("getDiff", () => {
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({
       diff: SAMPLE_DIFF,
       files: ["deps/added", "deps/updated", "x.ts"],
+      head: PR_REFS.headRefOid,
     });
     expect(batchInputs).toEqual([`${BASE_BLOB}\n${HEAD_BLOB}\n`]);
   });
@@ -518,6 +535,9 @@ describe("getDiff", () => {
       const batchInputs: string[] = [];
       const run: Run = async (cmd, stdin?: string) => {
         const key = cmd.join(" ");
+        if (key === "gh pr view 42 --json headRefOid") {
+          return ok(JSON.stringify({ headRefOid: PR_REFS.headRefOid }));
+        }
         if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
         if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
         if (key === "git config --get extensions.partialClone") return fail("", 1);
@@ -533,7 +553,11 @@ describe("getDiff", () => {
         if (key === `git -c core.quotePath=false diff ${range}`) return ok(SAMPLE_DIFF);
         throw new Error(`unexpected command: ${key}`);
       };
-      await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({ diff: SAMPLE_DIFF, files: ["changed-path"] });
+      await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual({
+        diff: SAMPLE_DIFF,
+        files: ["changed-path"],
+        head: PR_REFS.headRefOid,
+      });
       expect(batchInputs).toEqual([`${blob}\n`]);
     }
   });
@@ -543,6 +567,9 @@ describe("getDiff", () => {
     const run: Run = async (cmd) => {
       calls.push(cmd);
       const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: PR_REFS.headRefOid }));
+      }
       if (key === "gh pr diff 42") return fail(DIRECT_TOO_LARGE_RESPONSE, 1);
       if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(PR_REFS));
       if (key === "git config --get extensions.partialClone") return fail("", 1);
@@ -553,7 +580,7 @@ describe("getDiff", () => {
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
       "this partial clone needs Git 2.45 or newer to avoid lazy fetching",
     );
-    expect(calls).toHaveLength(5);
+    expect(calls).toHaveLength(6);
   });
 
   // Git v2.45 introduced --no-lazy-fetch; older Git is covered by the mocked
@@ -734,7 +761,7 @@ describe("getDiff", () => {
       [`git -c core.quotePath=false diff ${range}`]: ok(SAMPLE_DIFF),
     });
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).resolves.toEqual(
-      { diff: SAMPLE_DIFF, files: ["x.ts"] },
+      { diff: SAMPLE_DIFF, files: ["x.ts"], head: PR_REFS.headRefOid },
     );
   });
 

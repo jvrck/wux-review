@@ -37,32 +37,26 @@ export async function getDiff(
 ): Promise<ReviewDiff> {
   switch (target.kind) {
     case "pr": {
-      if (target.expectedHead !== undefined) {
-        await waitForExpectedHead(target.pr, target.expectedHead, target.headWaitMs ?? 60_000, run, clock);
+      const pinnedHead = target.expectedHead;
+      if (pinnedHead !== undefined) {
+        await waitForExpectedHead(target.pr, pinnedHead, target.headWaitMs ?? 60_000, run, clock);
       }
       // `gh pr diff <n>` is the full base...head diff for the PR — the complete
       // cumulative change across every commit on the branch, so a re-review sees
       // earlier-commit content (e.g. tests added in a prior commit) just like the
       // first review (#94).
-      let expected = target.expectedHead;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const command = ["gh", "pr", "diff", String(target.pr)];
-        const result = await run(command);
-        if (result.code !== 0) {
-          if (isLargePrDiffError(result.stderr)) {
-            return localPrDiff(target.pr, expected, run);
-          }
-          throw captureError(command, result.stderr, result.code);
-        }
-        const diff = result.stdout;
-        const names = await capture(run, ["gh", "pr", "diff", String(target.pr), "--name-only"]);
-        if (expected === undefined) return finalize(diff, splitLines(names));
-        const head = await readPrHead(target.pr, run);
-        if (head === expected) return { ...finalize(diff, splitLines(names)), head };
-        if (attempt === 1) throw headMismatch(target.pr, head, expected);
-        expected = head;
+      const before = pinnedHead ?? await readPrHead(target.pr, run);
+      const first = await fetchPrDiff(target.pr, pinnedHead, run);
+      const after = await readPrHead(target.pr, run);
+      if (after === before) return { ...first, head: before };
+      if (pinnedHead !== undefined) {
+        throw headMismatch(target.pr, after, pinnedHead);
       }
-      throw new Error("unreachable");
+
+      const second = await fetchPrDiff(target.pr, undefined, run);
+      const finalHead = await readPrHead(target.pr, run);
+      if (finalHead !== after) throw headMismatch(target.pr, finalHead, after);
+      return { ...second, head: after };
     }
     case "range": {
       // A three-dot `base...HEAD` range (target.ts) is the full cumulative diff of
@@ -95,6 +89,17 @@ export async function getDiff(
       return finalize(diff, files);
     }
   }
+}
+
+async function fetchPrDiff(pr: number, expectedHead: string | undefined, run: Run): Promise<ReviewDiff> {
+  const command = ["gh", "pr", "diff", String(pr)];
+  const result = await run(command);
+  if (result.code !== 0) {
+    if (isLargePrDiffError(result.stderr)) return localPrDiff(pr, expectedHead, run);
+    throw captureError(command, result.stderr, result.code);
+  }
+  const names = await capture(run, ["gh", "pr", "diff", String(pr), "--name-only"]);
+  return finalize(result.stdout, splitLines(names));
 }
 
 async function waitForExpectedHead(
