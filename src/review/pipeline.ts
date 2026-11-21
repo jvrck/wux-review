@@ -85,7 +85,10 @@ export async function runReview(input: ReviewInput, deps: ReviewDeps = {}): Prom
   const loadConfig = deps.loadConfig ?? defaultLoadConfig;
   const config = await loadConfig();
   const lenses = resolveLenses({ cliLenses: input.lenses, config });
-  const expectedHead = input.pr === undefined
+  const skipInjectedDiffLookup = input.expectedHead === undefined
+    && deps.getDiff !== undefined
+    && deps.run === undefined;
+  const expectedHead = input.pr === undefined || skipInjectedDiffLookup
     ? input.expectedHead
     : await resolveExpectedHead(input.pr, input.expectedHead, deps.run ?? defaultRun);
   const target = resolveTarget({ ref: input.ref, pr: input.pr, expectedHead });
