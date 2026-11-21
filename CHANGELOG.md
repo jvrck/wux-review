@@ -15,6 +15,9 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 - **Pinned pull-request reviews.** `--expect-head` waits for a pushed PR head
   and records the reviewed SHA in JSON, PR comments, and posted-verdict output.
+  Expected SHAs are normalized before comparison, a mid-fetch head change can
+  no longer replace an explicit or local-branch expectation, and local HEAD is
+  never inferred for a pull request from a fork.
 
 ## 2026.11.17
 
