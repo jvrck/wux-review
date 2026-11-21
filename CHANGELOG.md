@@ -11,6 +11,13 @@ PRs land; cutting a release renames it to the CalVer heading and opens a fresh
 
 ## Unreleased
 
+### Fixed
+
+- **Checkout validation.** Review commands, including `wux-review mcp`, now
+  fail before either reviewer starts when run outside a git checkout, instead
+  of guessing a target from the current directory. `skills show` remains
+  available outside a checkout.
+
 ## 2026.11.17
 
 ### Fixed

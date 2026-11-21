@@ -1,3 +1,5 @@
+import { realpath } from "node:fs/promises";
+import { isAbsolute, relative, sep } from "node:path";
 import { z } from "zod";
 import { WuxReviewError } from "../runtime/errors";
 
@@ -104,8 +106,33 @@ export async function loadConfig(dir?: string): Promise<WuxReviewConfig> {
   return parseConfig(text);
 }
 
-async function repoRoot(): Promise<string | undefined> {
-  const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" });
-  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  return code === 0 && out.trim() !== "" ? out.trim() : undefined;
+export async function repoRoot(): Promise<string | undefined> {
+  // Checkout discovery must describe the cwd itself, rather than a repository
+  // selected by a caller's ambient Git environment.
+  const environment = { ...process.env };
+  delete environment.GIT_DIR;
+  delete environment.GIT_WORK_TREE;
+  delete environment.GIT_COMMON_DIR;
+  delete environment.GIT_INDEX_FILE;
+  delete environment.GIT_NAMESPACE;
+  const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: environment,
+  });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  if (code !== 0) {
+    if (/not a git repository/i.test(err)) return undefined;
+    throw new WuxReviewError(err.trim() || "git rev-parse --show-toplevel failed");
+  }
+  const reportedRoot = out.replace(/\r?\n$/, "");
+  if (reportedRoot === "") return undefined;
+  const [root, cwd] = await Promise.all([
+    realpath(reportedRoot).catch(() => reportedRoot),
+    realpath(process.cwd()).catch(() => process.cwd()),
+  ]);
+  const pathFromRoot = relative(root, cwd);
+  return pathFromRoot === "" || (!isAbsolute(pathFromRoot) && pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`))
+    ? root
+    : undefined;
 }
