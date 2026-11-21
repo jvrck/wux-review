@@ -26,7 +26,7 @@ For a review → fix → re-review loop, pick a stable `--session <id>` up front
 
 `wux-review` spawns two equal, independent reviewers (Claude + Codex), feeds each the same diff and lens set, and returns one consolidated verdict:
 `{ verdict, must_fix, nice_fix, nits, reviewers, session, head }` (`head` is
-present for pinned PR reviews). Exit code: `0` approve, `2` block, `1` error.
+present for PR reviews). Exit code: `0` approve, `2` block, `1` error.
 
 When the caller is a shell script or an agent running with `set -e`, capture the
 status after preserving stdout. Exit `2` means **review blocked**, not a crashed
