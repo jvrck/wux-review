@@ -99,6 +99,10 @@ const roundSchema = z.object({
     claude: z.array(z.string()),
     codex: z.array(z.string()),
   }).strict().optional(),
+  preparedCleanup: z.object({
+    claude: z.record(z.string(), z.string()),
+    codex: z.record(z.string(), z.string()),
+  }).strict().optional(),
   ledger: z.object({
     claude: z.array(findingLedgerSchema),
     codex: z.array(findingLedgerSchema),
@@ -208,6 +212,10 @@ export interface ObservableRoundRecord {
   prepared?: {
     claude: string[];
     codex: string[];
+  };
+  preparedCleanup?: {
+    claude: Record<string, string>;
+    codex: Record<string, string>;
   };
   ledger: {
     claude: RefutationEntry[];
@@ -668,6 +676,7 @@ export function appendPreparedChild(
   childName: string,
   attempt: number,
   at: string,
+  cleanupDir?: string,
 ): ObservableRoundRecord {
   const expected = reviewer === "claude"
     ? record.expected.claudeChildName
@@ -685,18 +694,35 @@ export function appendPreparedChild(
     claude: [record.expected.claudeChildName],
     codex: [record.expected.codexChildName],
   };
-  if (prepared[reviewer].includes(childName)) return record;
-  if (attempt !== prepared[reviewer].length + 1) {
+  const alreadyPrepared = prepared[reviewer].includes(childName);
+  if (!alreadyPrepared && attempt !== prepared[reviewer].length + 1) {
     throw new WuxReviewError(
       `${childName} observable reviewer leg: non-sequential prepared attempt`,
     );
   }
+  if (alreadyPrepared && cleanupDir === undefined) return record;
   return {
     ...record,
     prepared: {
       ...prepared,
-      [reviewer]: [...prepared[reviewer], childName],
+      [reviewer]: alreadyPrepared
+        ? prepared[reviewer]
+        : [...prepared[reviewer], childName],
     },
+    ...(cleanupDir === undefined
+      ? {}
+      : {
+          preparedCleanup: {
+            claude: {
+              ...(record.preparedCleanup?.claude ?? {}),
+              ...(reviewer === "claude" ? { [childName]: cleanupDir } : {}),
+            },
+            codex: {
+              ...(record.preparedCleanup?.codex ?? {}),
+              ...(reviewer === "codex" ? { [childName]: cleanupDir } : {}),
+            },
+          },
+        }),
     updatedAt: at,
   };
 }

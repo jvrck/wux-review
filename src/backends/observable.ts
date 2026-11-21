@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -25,7 +25,11 @@ import {
   machineStreamChunkRecord,
   type ParsedMachineEvent,
 } from "./observable-events";
-import { codexHomeRoot } from "./codex-home";
+import {
+  cleanupTrashDirectory,
+  removeOwnedDir,
+  validateCleanupDirectory,
+} from "./run-layout";
 
 const WUX_COMMAND_TIMEOUT_MS = 30 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -106,7 +110,7 @@ export interface ObservableLegInput {
   outputPath?: string;
   cleanupFiles?: string[];
   cleanupDir?: string;
-  recordPrepared?: () => void | Promise<void>;
+  recordPrepared?: (cleanupDir?: string) => void | Promise<void>;
   recordEvidence?: (evidence: LegExecutionEvidence) => void | Promise<void>;
   signal?: AbortSignal;
 }
@@ -197,7 +201,17 @@ export function defaultObservableDeps(run: ObservableRun): ObservableAdapterDeps
   return {
     run,
     mkdir: (path) => mkdir(path, { recursive: true }).then(() => undefined),
-    rm: (path) => rm(path, { recursive: true, force: true }).then(() => undefined),
+    rm: async (path) => {
+      try {
+        if ((await lstat(path)).isDirectory()) {
+          throw new Error("observable adapter rm refuses directories");
+        }
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      await rm(path, { force: true });
+    },
     writeFile: (path, content) => Bun.write(path, content).then(() => undefined),
     writePrivateFile: (path, content) => writeFile(path, content, {
       encoding: "utf8",
@@ -559,6 +573,7 @@ export function buildObservableWrapperScript(paths: {
   recoveryOutputPath?: string;
   cleanupFiles?: string[];
   cleanupDir?: string;
+  cleanupTrashDir?: string;
 }): string {
   const redir = paths.stdinPath === undefined ? "< /dev/null" : `< ${shq(paths.stdinPath)}`;
   const command = paths.envPath === undefined
@@ -638,7 +653,16 @@ export function buildObservableWrapperScript(paths: {
         ...(paths.cleanupFiles ?? []).map((path) => `  ${helper} rm -f -- ${shq(path)}`),
         ...(paths.cleanupDir === undefined
           ? []
-          : [`  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`]),
+          : paths.cleanupTrashDir === undefined
+            ? [`  ${helper} rm -rf -- ${shq(paths.cleanupDir)}`]
+            : [
+                `  if [ -d ${shq(paths.cleanupTrashDir)} ] && [ ! -L ${shq(paths.cleanupTrashDir)} ]; then`,
+                `    __cleanup_trash=${shq(join(paths.cleanupTrashDir, `${basename(paths.cleanupDir)}.w$$`))}`,
+                `    ${helper} mv -- ${shq(paths.cleanupDir)} "$__cleanup_trash" && ${helper} rm -rf -- "$__cleanup_trash" || ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
+                "  else",
+                `    ${helper} rm -rf -- ${shq(paths.cleanupDir)}`,
+                "  fi",
+              ]),
         "}",
         "trap __cleanup_observable EXIT",
       ];
@@ -848,7 +872,7 @@ export async function runObservableLeg(
     // The parent journal must own this exact attempt before any launchable
     // bootstrap is published. Cleanup metadata is already durable here, so a
     // crash after the checkpoint but before Wux launch is safely reclaimable.
-    await input.recordPrepared?.();
+    await input.recordPrepared?.(input.cleanupDir);
     await deps.writeFile(argsPath, encodeNulRecords(input.argv));
     await deps.writePrivateFile(envPath, serializeEnvironment(input.env));
     if (input.stdin !== undefined) {
@@ -873,6 +897,9 @@ export async function runObservableLeg(
         recoveryOutputPath: input.outputPath === undefined ? undefined : recoveryOutputPath,
         cleanupFiles: input.cleanupFiles,
         cleanupDir: input.cleanupDir,
+        cleanupTrashDir: input.cleanupDir === undefined
+          ? undefined
+          : cleanupTrashDirectory(input.cleanupDir),
         releaseAckToken: resultId,
         parentPid: process.pid,
       }),
@@ -1773,10 +1800,11 @@ export async function discardPreparedObservableLeg(
     ...overrides,
   };
   const base = tempPathBase(deps.tmpDir, childName);
-  const cleanupPaths = preparedTransientPathsForBase(
+  const cleanupFiles = preparedTransientPathsForBase(
     base,
     reviewer === "codex" && observableRetryAttempt(childName) === undefined,
   );
+  let cleanupDirectory: string | undefined;
   let cleanupMetadataError: unknown;
   const rawCleanup = await deps.readFile(
     `${base}-observable-prepared-cleanup.json`,
@@ -1794,10 +1822,8 @@ export async function discardPreparedObservableLeg(
         parsed.data.cleanupDir,
         deps.tmpDir,
       );
-      cleanupPaths.push(...parsed.data.cleanupFiles);
-      if (parsed.data.cleanupDir !== undefined) {
-        cleanupPaths.push(parsed.data.cleanupDir);
-      }
+      cleanupFiles.push(...parsed.data.cleanupFiles);
+      cleanupDirectory = parsed.data.cleanupDir;
     } catch (error) {
       cleanupMetadataError = error instanceof WuxReviewError
         ? error
@@ -1815,7 +1841,7 @@ export async function discardPreparedObservableLeg(
   // survive: it may be the only record of an isolated home outside this base.
   await stopOwnedChild({ deps, childName });
   if (cleanupMetadataError !== undefined) throw cleanupMetadataError;
-  await cleanupTransient(deps, [...new Set(cleanupPaths)]);
+  await cleanupTransient(deps, [...new Set(cleanupFiles)], cleanupDirectory);
 }
 
 function assertReconcilableIdentity(
@@ -2388,10 +2414,14 @@ function isWuxRunAlreadyGone(detail: string): boolean {
 
 async function cleanupTransient(
   deps: ObservableAdapterDeps,
-  paths: string[],
+  files: string[],
+  directory?: string,
 ): Promise<void> {
   try {
-    await Promise.all(paths.map((path) => deps.rm(path)));
+    await Promise.all([
+      ...files.map((path) => deps.rm(path)),
+      ...(directory === undefined ? [] : [removeOwnedDir(directory)]),
+    ]);
   } catch (error) {
     throw new WuxReviewError(`observable transient cleanup failed: ${errorDetail(error)}`);
   }
@@ -2995,32 +3025,9 @@ export function validateObservableCleanup(
       throw new WuxReviewError(`unsafe observable cleanup file: ${JSON.stringify(path)}`);
     }
   }
-  if (dir !== undefined && !isValidCodexCleanupDir(dir)) {
+  if (dir !== undefined && !validateCleanupDirectory(dir)) {
     throw new WuxReviewError(`unsafe observable cleanup directory: ${JSON.stringify(dir)}`);
   }
-}
-
-function isValidCodexCleanupDir(dir: string): boolean {
-  if (!isAbsolute(dir) || dir === "/") return false;
-  const root = resolve(codexHomeRoot());
-  const candidate = resolve(dir);
-  const name = basename(candidate);
-  if (dirname(candidate) === root && name.startsWith("wuxr-codex-home-")) {
-    return true;
-  }
-  const home = dirname(candidate);
-  return (
-    name.startsWith("wuxr-reviewer-cwd-")
-    && dirname(home) === root
-    && basename(home).startsWith("wuxr-codex-home-")
-  ) || (
-    // Claude still creates its independently-isolated cwd under tmpdir(). This
-    // is the only production non-Codex-home cleanup shape; accepting the exact
-    // direct child prefix preserves interruption cleanup without admitting a
-    // temp CODEX_HOME or arbitrary temporary path.
-    dirname(candidate) === resolve(tmpdir())
-    && name.startsWith("wuxr-reviewer-cwd-")
-  );
 }
 
 function shq(path: string): string {

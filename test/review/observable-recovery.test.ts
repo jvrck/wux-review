@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, createHmac } from "node:crypto";
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HeadlessRunOptions } from "../../src/backends/headless";
@@ -925,7 +927,7 @@ describe("observable parent recovery", () => {
       `${h.evidence.codex.transientBase}-prompt.md`,
     ];
     const preparedOutput = "/tmp/recovery/prepared-codex-output.txt";
-    const preparedHome = join(CODEX_HOME_ROOT, "wuxr-codex-home-prepared-recovery");
+    const preparedHome = join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123");
     h.files.set(
       `${h.evidence.codex.transientBase}-observable-prepared-cleanup.json`,
       `${JSON.stringify({
@@ -935,7 +937,7 @@ describe("observable parent recovery", () => {
         cleanupDir: preparedHome,
       })}\n`,
     );
-    preparedPaths.push(preparedOutput, preparedHome);
+    preparedPaths.push(preparedOutput);
     for (const path of preparedPaths) h.files.set(path, "prepared transient");
     const calls: string[][] = [];
     await expect(reconcileReview(h.reviewId, {
@@ -1186,7 +1188,7 @@ describe("observable parent recovery", () => {
     const h = recoveryHarness();
     const promptPath = "/tmp/recovery/recover-review-r1-codex-prompt.md";
     const outputPath = "/tmp/recovery/recover-review-r1-codex-last.txt";
-    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-recovery");
+    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-DeF456");
     Object.assign(h.evidence.codex, {
       cleanupFiles: [promptPath, outputPath],
       cleanupDir,
@@ -1197,7 +1199,12 @@ describe("observable parent recovery", () => {
     });
     h.files.set(promptPath, "diff-bearing prompt");
     h.files.set(outputPath, REPORT);
-    h.files.set(cleanupDir, "isolated home");
+    const removed: string[] = [];
+    const removeTransient = h.observable.rm;
+    h.observable.rm = async (path: string) => {
+      removed.push(path);
+      await removeTransient(path);
+    };
     await expect(reconcileReview(h.reviewId, {
       roundStore: h.roundStore,
       sessionStore: h.sessionStore,
@@ -1206,7 +1213,74 @@ describe("observable parent recovery", () => {
     })).resolves.toMatchObject({ verdict: "approve" });
     expect(h.files.has(promptPath)).toBe(false);
     expect(h.files.has(outputPath)).toBe(false);
-    expect(h.files.has(cleanupDir)).toBe(false);
+    expect(removed).not.toContain(cleanupDir);
+  });
+
+  test("T-shared-recovery-cleanup-nondirectories: shared recovery keeps special entries at accepted paths", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "wuxr-shared-recovery-outside-"));
+    const cleanupPaths: string[] = [];
+    const servers: ReturnType<typeof createServer>[] = [];
+    try {
+      const file = await sharedRecoveryPath(async (path) => {
+        await writeFile(path, "foreign file");
+      });
+      const fifo = await sharedRecoveryPath(async (path) => {
+        expect(await Bun.spawn(["/usr/bin/mkfifo", path]).exited).toBe(0);
+      });
+      const socket = await sharedRecoveryPath(async (path) => {
+        const server = createServer();
+        servers.push(server);
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(path, () => {
+            server.off("error", reject);
+            resolve();
+          });
+        });
+      });
+      const outsideFile = join(outside, "outside-file");
+      const outsideDirectory = join(outside, "outside-directory");
+      await writeFile(outsideFile, "keep");
+      await mkdir(outsideDirectory);
+      const fileLink = await sharedRecoveryPath((path) => symlink(outsideFile, path));
+      const directoryLink = await sharedRecoveryPath((path) => symlink(outsideDirectory, path));
+      cleanupPaths.push(file, fifo, socket, fileLink, directoryLink);
+
+      for (const cleanupDir of cleanupPaths) {
+        const h = recoveryHarness();
+        Object.assign(h.evidence.codex, { cleanupDir });
+        Object.assign(h.round.evidence.codex[0]!, { cleanupDir });
+        const removeTransient = h.observable.rm;
+        h.observable.rm = async (path: string) => {
+          if (path === cleanupDir) await rm(path, { force: true });
+          else await removeTransient(path);
+        };
+        await expect(reconcileReview(h.reviewId, {
+          roundStore: h.roundStore,
+          sessionStore: h.sessionStore,
+          run: h.run,
+          observable: h.observable,
+        })).resolves.toMatchObject({ verdict: "approve" });
+        expect(await lstat(cleanupDir)).toBeDefined();
+      }
+      expect(await Bun.file(outsideFile).text()).toBe("keep");
+      expect((await lstat(outsideDirectory)).isDirectory()).toBe(true);
+      const ownedDirectory = await mkdtemp(join(tmpdir(), "wuxr-reviewer-cwd-"));
+      const h = recoveryHarness();
+      Object.assign(h.evidence.codex, { cleanupDir: ownedDirectory });
+      Object.assign(h.round.evidence.codex[0]!, { cleanupDir: ownedDirectory });
+      await expect(reconcileReview(h.reviewId, {
+        roundStore: h.roundStore,
+        sessionStore: h.sessionStore,
+        run: h.run,
+        observable: h.observable,
+      })).resolves.toMatchObject({ verdict: "approve" });
+      expect(await Bun.file(ownedDirectory).exists()).toBe(false);
+    } finally {
+      await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+      await Promise.all(cleanupPaths.map((path) => rm(path, { force: true })));
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   test("preserves the existing Codex retry count and accepts only the final successful attempt", async () => {
@@ -1230,7 +1304,7 @@ describe("observable parent recovery", () => {
     });
     const promptPath = "/tmp/recovery/shared-codex-prompt.md";
     const outputPath = "/tmp/recovery/shared-codex-last.txt";
-    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-shared-recovery");
+    const cleanupDir = join(CODEX_HOME_ROOT, "wuxr-codex-home-GhI789");
     for (const entry of [h.evidence.codex, h.codexRetry!]) {
       Object.assign(entry, {
         cleanupFiles: [promptPath, outputPath],
@@ -1266,7 +1340,7 @@ describe("observable parent recovery", () => {
     })).resolves.toMatchObject({ verdict: "approve" });
     expect(h.files.has(promptPath)).toBe(false);
     expect(h.files.has(outputPath)).toBe(false);
-    expect(h.files.has(cleanupDir)).toBe(false);
+    expect(h.files.get(cleanupDir)).toBe("shared home");
   });
 
   test("cross-leg swaps and duplicate identities fail before model calls and clean exact children", async () => {
@@ -1512,4 +1586,13 @@ function cleanupProof(
     .update("\0")
     .update(stopBy)
     .digest("hex");
+}
+
+async function sharedRecoveryPath(
+  create: (path: string) => Promise<void>,
+): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), "wuxr-reviewer-cwd-"));
+  await rm(path, { recursive: true, force: true });
+  await create(path);
+  return path;
 }

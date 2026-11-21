@@ -33,7 +33,7 @@ const CODEX_COMMAND = JSON.stringify({
   item: { type: "command_execution", exit_code: 0, status: "completed" },
 });
 const CODEX_HOME_ROOT = codexHomeRoot();
-const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-test");
+const REVIEWER_CWD = join(tmpdir(), "wuxr-reviewer-cwd-AbC123");
 const claudeEnvelope = (result: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ type: "result", subtype: "success", is_error: false, result, ...extra });
 
@@ -268,7 +268,7 @@ function harness(opts: Opts = {}) {
       cwdPrepareCalls++;
       const path = parentDir === undefined
         ? REVIEWER_CWD
-        : `${parentDir}/wuxr-reviewer-cwd-test`;
+        : `${parentDir}/wuxr-reviewer-cwd-AbC123`;
       return {
         path,
         cleanup: async () => {
@@ -1128,7 +1128,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-test"),
+      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123"),
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
       sessionName: "s",
@@ -1160,7 +1160,7 @@ describe("observable Wux adapter", () => {
     const abort = new AbortController();
     const h = harness({
       isolateCodexHome: true,
-      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-test"),
+      observableCleanupPath: join(CODEX_HOME_ROOT, "wuxr-codex-home-AbC123"),
       abortOnStop: abort,
     });
     await expect(createCodexHeadlessBackend(h.deps)("P", {
@@ -1304,6 +1304,38 @@ describe("observable Wux adapter", () => {
     }
   });
 
+  test("T-wrapper-mv-trash: the EXIT trap moves an owned run through trash before removal", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-trash-"));
+    try {
+      const runs = join(dir, "state", "wux-review", "runs");
+      const trash = join(runs, ".trash");
+      const cleanupDir = join(runs, "r-kf12oi-ABC123");
+      const argsPath = join(dir, "args");
+      const readyPath = join(dir, "ready");
+      const scriptPath = join(dir, "wrap.sh");
+      await mkdir(trash, { recursive: true });
+      await mkdir(cleanupDir);
+      await Bun.write(join(cleanupDir, "state"), "throwaway");
+      await Bun.write(argsPath, "/usr/bin/true\0");
+      await Bun.write(readyPath, "ready\n");
+      await Bun.write(scriptPath, buildObservableWrapperScript({
+        argsPath,
+        stdoutPath: join(dir, "out"),
+        stderrPath: join(dir, "err"),
+        donePath: join(dir, "done"),
+        readyPath,
+        cleanupDir,
+        cleanupTrashDir: trash,
+      }));
+
+      expect(await Bun.spawn(["/bin/bash", scriptPath]).exited).toBe(0);
+      expect(await Bun.file(cleanupDir).exists()).toBe(false);
+      expect((await readdir(trash)).length).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a normally-exiting observable attempt leaves shared retry inputs for its live parent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wuxr-observable-retry-cleanup-"));
     try {
@@ -1377,6 +1409,24 @@ describe("observable Wux adapter", () => {
       expect(await Bun.file(donePath).text()).toBe("0");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("T-wrapper-allowlist: cleanup mv and rm helpers use the fixed PATH", () => {
+    const script = buildObservableWrapperScript({
+      argsPath: "/tmp/args",
+      stdoutPath: "/tmp/stdout",
+      stderrPath: "/tmp/stderr",
+      donePath: "/tmp/done",
+      readyPath: "/tmp/ready",
+      cleanupFiles: ["/tmp/prompt"],
+      cleanupDir: "/state/wux-review/runs/r-kf12oi-ABC123",
+      cleanupTrashDir: "/state/wux-review/runs/.trash",
+    });
+    const helpers = script.split("\n").filter((line) => /\b(?:mv|rm)\b/.test(line));
+    expect(helpers.length).toBeGreaterThanOrEqual(3);
+    for (const line of helpers) {
+      expect(line).toContain("PATH=/usr/bin:/bin");
     }
   });
 
@@ -2345,8 +2395,8 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     process.env.XDG_STATE_HOME = state;
     try {
       const home = await prepareIsolatedCodexHome();
-      const root = join(state, "wux-review", "codex-homes");
-      expect(home.env.CODEX_HOME).toStartWith(`${root}/wuxr-codex-home-`);
+      const root = join(state, "wux-review", "runs");
+      expect(home.env.CODEX_HOME).toMatch(new RegExp(`^${root}/r-[0-9a-z]+-[A-Za-z0-9]{6}/home$`));
       expect((await stat(root)).mode & 0o777).toBe(0o700);
       expect((await stat(home.env.CODEX_HOME!)).mode & 0o777).toBe(0o700);
       await home.cleanup();
@@ -2391,7 +2441,7 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     await symlink(target, join(state, "wux-review"));
     process.env.XDG_STATE_HOME = state;
     try {
-      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("cannot create secure per-leg CODEX_HOME");
     } finally {
       if (prior === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = prior;
@@ -2400,15 +2450,15 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     }
   });
 
-  test("refuses a symlinked codex-homes root", async () => {
+  test("refuses a symlinked runs root", async () => {
     const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
     const target = await mkdtemp(join(tmpdir(), "wuxr-xdg-target-"));
     const prior = process.env.XDG_STATE_HOME;
     await mkdir(join(state, "wux-review"), { recursive: true });
-    await symlink(target, join(state, "wux-review", "codex-homes"));
+    await symlink(target, join(state, "wux-review", "runs"));
     process.env.XDG_STATE_HOME = state;
     try {
-      await expect(prepareIsolatedCodexHome()).rejects.toThrow("secure per-leg CODEX_HOME root");
+      await expect(prepareIsolatedCodexHome()).rejects.toThrow("cannot create secure per-leg CODEX_HOME");
     } finally {
       if (prior === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = prior;
@@ -2417,7 +2467,7 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     }
   });
 
-  test("prunes only old real own-prefix homes", async () => {
+  test("does not prune legacy homes during PR1 run preparation", async () => {
     const state = await mkdtemp(join(tmpdir(), "wuxr-xdg-state-"));
     const prior = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = state;
@@ -2430,12 +2480,10 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
     try {
       await mkdir(root, { recursive: true });
       await Promise.all([mkdir(oldHome), mkdir(youngHome), mkdir(other)]);
-      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
-      await Promise.all([utimes(oldHome, old, old), utimes(other, old, old)]);
       await symlink(outside, link);
       const home = await prepareIsolatedCodexHome();
       await home.cleanup();
-      expect(await Bun.file(oldHome).exists()).toBe(false);
+      expect((await lstat(oldHome)).isDirectory()).toBe(true);
       expect((await lstat(youngHome)).isDirectory()).toBe(true);
       expect((await lstat(other)).isDirectory()).toBe(true);
       expect((await lstat(link)).isSymbolicLink()).toBe(true);
@@ -2695,6 +2743,23 @@ describe("prepareIsolatedCodexHome (real fs)", () => {
 });
 
 describe("prepareReviewerCwd (real fs)", () => {
+  test("T-run-layout-claude: creates the Claude cwd in the private state run root", async () => {
+    const state = await mkdtemp(join(tmpdir(), "wuxr-run-state-"));
+    const prior = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = state;
+    try {
+      const cwd = await prepareReviewerCwd();
+      expect(cwd.path).toMatch(new RegExp(
+        `^${join(state, "wux-review", "runs")}/r-[0-9a-z]+-[A-Za-z0-9]{6}/cwd$`,
+      ));
+      await cwd.cleanup();
+    } finally {
+      if (prior === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = prior;
+      await rm(state, { recursive: true, force: true });
+    }
+  });
+
   test("creates a unique mode-0700 directory per leg and removes each on teardown", async () => {
     const first = await prepareReviewerCwd();
     const second = await prepareReviewerCwd();

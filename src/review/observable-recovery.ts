@@ -5,6 +5,7 @@ import {
   type HeadlessRun,
 } from "../backends/headless";
 import { codexExecutionFailure } from "../backends/observable-events";
+import { removeOwnedDir } from "../backends/run-layout";
 import {
   defaultObservableDeps,
   discardPreparedObservableLeg,
@@ -508,13 +509,17 @@ async function cleanupSharedRecoveryResources(
   evidence: LegExecutionEvidence[],
   observable: ObservableAdapterDeps,
 ): Promise<void> {
-  const paths = new Set<string>();
+  const files = new Set<string>();
+  const directories = new Set<string>();
   for (const record of evidence) {
-    for (const path of record.cleanupFiles ?? []) paths.add(path);
-    if (record.cleanupDir !== undefined) paths.add(record.cleanupDir);
+    for (const path of record.cleanupFiles ?? []) files.add(path);
+    if (record.cleanupDir !== undefined) directories.add(record.cleanupDir);
   }
   try {
-    await Promise.all([...paths].map((path) => observable.rm(path)));
+    await Promise.all([
+      ...[...files].map((path) => observable.rm(path)),
+      ...[...directories].map((path) => removeOwnedDir(path)),
+    ]);
   } catch (error) {
     throw new WuxReviewError(
       `observable shared recovery cleanup failed: ${errorDetail(error)}`,
