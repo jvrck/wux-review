@@ -399,7 +399,7 @@ describe("review pipeline (in-process, injected reviewers)", () => {
     }
   });
 
-  test("skills is rejected from a non-git cwd", async () => {
+  test("skills show remains available from a non-git cwd", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
     const cwd = realpathSync(dir);
     const previousCeiling = process.env.GIT_CEILING_DIRECTORIES;
@@ -410,8 +410,8 @@ describe("review pipeline (in-process, injected reviewers)", () => {
     delete process.env.GIT_WORK_TREE;
     try {
       const result = await callCli(["skills", "show", "wux-review"], cwd, {});
-      expect(result.code).toBe(1);
-      expect(result.stderr).toBe(`wux-review: not a git checkout: ${cwd}\n`);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("wux-review");
     } finally {
       if (previousCeiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
       else process.env.GIT_CEILING_DIRECTORIES = previousCeiling;
