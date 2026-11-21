@@ -381,20 +381,23 @@ async function resolveExpectedHead(pr: number, explicit: string | undefined, run
     }
     return normalizeObjectId(explicit);
   }
-  const view = await run(["gh", "pr", "view", String(pr), "--json", "headRefName,headRefOid"]);
-  if (view.code !== 0) {
-    process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
-    return undefined;
-  }
-  let prHead: { headRefName?: unknown };
-  try { prHead = JSON.parse(view.stdout) as { headRefName?: unknown }; } catch {
-    process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
-    return undefined;
-  }
-  const branch = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
-  const head = await run(["git", "rev-parse", "HEAD"]);
-  if (typeof prHead.headRefName === "string" && branch.code === 0 && head.code === 0 && branch.stdout.trim() === prHead.headRefName && isObjectId(head.stdout.trim())) {
-    return normalizeObjectId(head.stdout.trim());
+  const view = await run(["gh", "pr", "view", String(pr), "--json", "isCrossRepository,headRefName"]);
+  if (view.code === 0) {
+    let prHead: { isCrossRepository?: unknown; headRefName?: unknown } | undefined;
+    try {
+      prHead = JSON.parse(view.stdout) as { isCrossRepository?: unknown; headRefName?: unknown };
+    } catch {
+      prHead = undefined;
+    }
+    if (prHead?.isCrossRepository === false && typeof prHead.headRefName === "string") {
+      const branch = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
+      if (branch.code === 0 && branch.stdout.trim() === prHead.headRefName) {
+        const head = await run(["git", "rev-parse", "HEAD"]);
+        if (head.code === 0 && isObjectId(head.stdout.trim())) {
+          return normalizeObjectId(head.stdout.trim());
+        }
+      }
+    }
   }
   process.stderr.write(`wux-review: PR #${pr}: no expected head supplied; reviewing GitHub's current head\n`);
   return undefined;

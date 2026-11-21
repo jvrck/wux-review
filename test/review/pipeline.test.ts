@@ -66,8 +66,8 @@ describe("runReview", () => {
     let capturedTarget: unknown;
     const run: Run = async (cmd) => {
       const key = cmd.join(" ");
-      if (key === "gh pr view 42 --json headRefName,headRefOid") {
-        return { code: 0, stdout: JSON.stringify({ headRefName: "feature", headRefOid: "b".repeat(40) }), stderr: "" };
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return { code: 0, stdout: JSON.stringify({ isCrossRepository: false, headRefName: "feature" }), stderr: "" };
       }
       if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "feature\n", stderr: "" };
       if (key === "git rev-parse HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
@@ -104,8 +104,8 @@ describe("runReview", () => {
     let capturedTarget: unknown;
     const run: Run = async (cmd) => {
       const key = cmd.join(" ");
-      if (key === "gh pr view 42 --json headRefName,headRefOid") {
-        return { code: 0, stdout: JSON.stringify({ headRefName: "feature", headRefOid: "b".repeat(40) }), stderr: "" };
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return { code: 0, stdout: JSON.stringify({ isCrossRepository: false, headRefName: "feature" }), stderr: "" };
       }
       if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "feature\n", stderr: "" };
       if (key === "git rev-parse HEAD") return { code: 0, stdout: `${"a".repeat(41)}\n`, stderr: "" };
@@ -147,10 +147,7 @@ describe("runReview", () => {
     let localLookups = 0;
     const run: Run = async (cmd) => {
       const key = cmd.join(" ");
-      if (
-        key === "gh pr view 42 --json headRefName,headRefOid"
-        || key === "gh pr view 42 --json isCrossRepository,headRefName"
-      ) {
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
         return {
           code: 0,
           stdout: JSON.stringify({
@@ -207,8 +204,8 @@ describe("runReview", () => {
     let capturedTarget: unknown;
     const run: Run = async (cmd) => {
       const key = cmd.join(" ");
-      if (key === "gh pr view 42 --json headRefName,headRefOid") {
-        return { code: 0, stdout: JSON.stringify({ headRefName: "feature", headRefOid: "b".repeat(40) }), stderr: "" };
+      if (key === "gh pr view 42 --json isCrossRepository,headRefName") {
+        return { code: 0, stdout: JSON.stringify({ isCrossRepository: false, headRefName: "feature" }), stderr: "" };
       }
       if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "other\n", stderr: "" };
       if (key === "git rev-parse HEAD") return { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" };
