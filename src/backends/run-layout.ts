@@ -244,5 +244,25 @@ export async function removeOwnedDir(path: string, options: CleanupPathOptions =
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
+  let renamed;
+  try {
+    renamed = await lstat(destination);
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      process.stderr.write(`wux-review: leaving unverified cleanup path ${JSON.stringify(destination)}\n`);
+      return;
+    }
+    throw error;
+  }
+  if (
+    !renamed.isDirectory()
+    || renamed.isSymbolicLink()
+    || (uid !== undefined && renamed.uid !== uid)
+    || renamed.dev !== metadata.dev
+    || renamed.ino !== metadata.ino
+  ) {
+    process.stderr.write(`wux-review: leaving replaced cleanup path ${JSON.stringify(destination)}\n`);
+    return;
+  }
   await rm(destination, { recursive: true, force: true });
 }

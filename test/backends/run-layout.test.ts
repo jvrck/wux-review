@@ -8,6 +8,7 @@ import {
   ensureRunsRoot,
   readRunJson,
   removeOwnedDir,
+  runsTrashRoot,
   validateCleanupDirectory,
 } from "../../src/backends/run-layout";
 
@@ -286,7 +287,6 @@ describe("PR1 run layout", () => {
       legMaxMs: 900_000,
     });
     const victim = join(stateDir, "victim");
-    const sentinel = join(run.path, "keep");
     await mkdir(victim);
     await writeFile(join(victim, "keep"), "keep");
 
@@ -299,8 +299,11 @@ describe("PR1 run layout", () => {
       },
     });
 
-    expect(await Bun.file(sentinel).exists()).toBe(true);
-    expect((await lstat(run.path)).isDirectory()).toBe(true);
+    const retained = await readdir(runsTrashRoot({ stateDir, tempDir: tmpdir() }));
+    expect(retained).toHaveLength(1);
+    const retainedVictim = join(runsTrashRoot({ stateDir, tempDir: tmpdir() }), retained[0]!);
+    expect(await Bun.file(join(retainedVictim, "keep")).exists()).toBe(true);
+    expect((await lstat(retainedVictim)).isDirectory()).toBe(true);
   });
 
   test("T-run-wrong-uid: a run belonging to another uid is kept", async () => {
