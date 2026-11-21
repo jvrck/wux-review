@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { type CliDeps, parseReviewArgs, runCli } from "../src/cli";
 import { DEFAULT_LENSES } from "../src/review/lenses";
 import { EndSessionFailure } from "../src/review/session";
@@ -133,6 +133,23 @@ async function run(args: string[], env?: Record<string, string>, cwd?: string): 
   return { code, stdout, stderr };
 }
 
+async function withFailingGit<T>(message: string, fn: () => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "wuxr-fake-git-"));
+  const git = join(dir, "git");
+  const previousPath = process.env.PATH;
+  const shellMessage = message.replaceAll("'", "'\"'\"'");
+  writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' '${shellMessage}' >&2\nexit 128\n`);
+  chmodSync(git, 0o755);
+  process.env.PATH = `${dir}${delimiter}${previousPath ?? ""}`;
+  try {
+    return await fn();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 test("--help prints usage covering every documented flag and exits 0", async () => {
   const { code, stdout } = await run(["--help"]);
   expect(code).toBe(0);
@@ -259,6 +276,90 @@ describe("reconcile subcommand", () => {
 });
 
 describe("review pipeline (in-process, injected reviewers)", () => {
+  test("reports a non-repository git discovery error exactly and starts no reviewer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wuxr-git-error-"));
+    const cwd = realpathSync(dir);
+    const gitMessage = "fatal: detected dubious ownership in repository at '<path>'";
+    let reviewerCalls = 0;
+    try {
+      const result = await withFailingGit(gitMessage, () => callCli(["HEAD~1"], cwd, {
+        runReviewers: async () => {
+          reviewerCalls += 1;
+          throw new Error("reviewers must not start after git discovery fails");
+        },
+      }));
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`wux-review: ${gitMessage}\n`);
+      expect(reviewerCalls).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("maps git's real not-a-repository error to not a git checkout", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
+    const cwd = realpathSync(dir);
+    const gitMessage = "fatal: not a git repository (or any of the parent directories): .git";
+    let reviewerCalls = 0;
+    try {
+      const result = await withFailingGit(gitMessage, () => callCli(["HEAD~1"], cwd, {
+        runReviewers: async () => {
+          reviewerCalls += 1;
+          throw new Error("reviewers must not start outside a git checkout");
+        },
+      }));
+      expect(result.code).toBe(1);
+      expect(result.stderr).toBe(`wux-review: not a git checkout: ${cwd}\n`);
+      expect(reviewerCalls).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("checkout-independent commands bypass failing git discovery", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
+    const cwd = realpathSync(dir);
+    const gitMessage = "fatal: detected dubious ownership in repository at '<path>'";
+    try {
+      await withFailingGit(gitMessage, async () => {
+        const help = await callCli(["--help"], cwd, {});
+        expect(help.code).toBe(0);
+        expect(help.stdout).toContain("wux-review");
+
+        const version = await callCli(["--version"], cwd, {});
+        expect(version.code).toBe(0);
+
+        const skills = await callCli(["skills", "show", "wux-review"], cwd, {});
+        expect(skills.code).toBe(0);
+        expect(skills.stdout).toContain("name: wux-review");
+
+        let reconciled: string | undefined;
+        const reconcile = await callCli(["reconcile", "recover-1", "--json"], cwd, {
+          reconcileReview: async (reviewId) => {
+            reconciled = reviewId;
+            return {
+              kind: "terminal-cleanup-completed",
+              reviewId,
+              state: "failed",
+              diagnostic: "cleanup complete",
+            };
+          },
+        });
+        expect(reconcile.code).toBe(0);
+        expect(reconciled).toBe("recover-1");
+
+        let ended: string | undefined;
+        const endSession = await callCli(["--session", "s", "--end-session"], cwd, {
+          endSession: async (sessionId) => { ended = sessionId; },
+        });
+        expect(endSession.code).toBe(0);
+        expect(ended).toBe("s");
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a non-git cwd fails before either reviewer starts, while help and version remain available", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wuxr-no-git-"));
     const cwd = realpathSync(dir);
