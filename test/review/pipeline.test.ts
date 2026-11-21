@@ -136,6 +136,67 @@ describe("runReview", () => {
     expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
   });
 
+  test("does not default to local HEAD for a fork PR with the same branch name", async () => {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let capturedTarget: unknown;
+    let localLookups = 0;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (
+        key === "gh pr view 42 --json headRefName,headRefOid"
+        || key === "gh pr view 42 --json isCrossRepository,headRefName"
+      ) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            headRefName: "feature",
+            headRefOid: "b".repeat(40),
+            isCrossRepository: true,
+          }),
+          stderr: "",
+        };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") {
+        localLookups++;
+        return { code: 0, stdout: "feature\n", stderr: "" };
+      }
+      if (key === "git rev-parse HEAD") {
+        localLookups++;
+        return { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      }
+      throw new Error(`unexpected command: ${key}`);
+    };
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          run,
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"] };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(localLookups).toBe(0);
+    expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
+  });
+
   test("leaves the PR head unpinned off-branch and prints one stderr note", async () => {
     const writes: string[] = [];
     const originalWrite = process.stderr.write;
