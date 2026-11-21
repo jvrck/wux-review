@@ -260,7 +260,9 @@ describe("runReview", () => {
           throw new Error("reviewers must not launch");
         },
       },
-    )).rejects.toThrow(`PR #42 head is ${moved}, expected ${expected}; push may not have landed`);
+    )).rejects.toThrow(
+      `PR #42 head moved from ${expected} to ${moved} during the review fetch; re-run the review`,
+    );
     expect(launched).toBe(false);
   });
 

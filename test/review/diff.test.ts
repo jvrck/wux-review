@@ -267,7 +267,7 @@ describe("getDiff", () => {
     };
 
     await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run)).rejects.toThrow(
-      `PR #42 head is ${MOVED_HEAD}, expected ${EXPECTED_HEAD}; push may not have landed`,
+      `PR #42 head moved from ${EXPECTED_HEAD} to ${MOVED_HEAD} during the review fetch; re-run the review`,
     );
     expect(diffReads).toBe(1);
   });
@@ -310,7 +310,7 @@ describe("getDiff", () => {
     };
 
     await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
-      `PR #42 head is ${SECOND_MOVED_HEAD}, expected ${MOVED_HEAD}; push may not have landed`,
+      `PR #42 head moved from ${MOVED_HEAD} to ${SECOND_MOVED_HEAD} during the review fetch; re-run the review`,
     );
     expect(diffReads).toBe(2);
   });
@@ -355,7 +355,7 @@ describe("getDiff", () => {
     };
 
     await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run)).rejects.toThrow(
-      `PR #42 head is ${PR_REFS.headRefOid}, expected ${EXPECTED_HEAD}; push may not have landed`,
+      `PR #42 head moved from ${EXPECTED_HEAD} to ${PR_REFS.headRefOid} during the review fetch; re-run the review`,
     );
     expect(gitCalled).toBe(false);
   });
