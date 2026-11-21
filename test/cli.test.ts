@@ -384,21 +384,26 @@ describe("review pipeline (in-process, injected reviewers)", () => {
   test("PR JSON and the posted-verdict stderr signal carry the reviewed head", async () => {
     const dir = gitRepo();
     const head = "abcdef0123456789abcdef0123456789abcdef01";
+    let target: unknown;
     try {
       const deps = {
         runReviewers: fakeReviewers([], []),
-        getDiff: async () => ({ diff: "diff\n", files: ["x.ts"], head }),
+        getDiff: async (received: unknown) => {
+          target = received;
+          return { diff: "diff\n", files: ["x.ts"], head };
+        },
         postToPr: async (_pr: number, env: { round?: number }) => [
           { reviewer: "claude" as const, url: "https://github.com/o/r/pull/42#c1", round: env.round ?? 1 },
           { reviewer: "codex" as const, url: "https://github.com/o/r/pull/42#c2", round: env.round ?? 1 },
         ],
       } as CliDeps & { getDiff: () => Promise<{ diff: string; files: string[]; head: string }> };
       const { code, stdout, stderr } = await callCli(
-        ["--pr", "42", "--expect-head", head, "--json", "--post-to-pr", "42", "--direct"],
+        ["--pr", "42", "--expect-head", head.toUpperCase(), "--json", "--post-to-pr", "42", "--direct"],
         dir,
         deps,
       );
       expect(code).toBe(0);
+      expect(target).toEqual({ kind: "pr", pr: 42, expectedHead: head, headWaitMs: undefined });
       expect(JSON.parse(stdout).head).toBe(head);
       expect(stderr).toContain("verdict posted (round 1, head abcdef012345)");
     } finally {
@@ -716,8 +721,8 @@ describe("parseReviewArgs", () => {
   test("--expect-head accepts a full object id and rejects invalid SHAs", () => {
     const sha1 = "a".repeat(40);
     const sha256 = "b".repeat(64);
-    expect(parseReviewArgs(["--pr", "7", "--expect-head", sha1]).expectedHead).toBe(sha1);
-    expect(parseReviewArgs(["--pr", "7", "--expect-head", sha256]).expectedHead).toBe(sha256);
+    expect(parseReviewArgs(["--pr", "7", "--expect-head", sha1.toUpperCase()]).expectedHead).toBe(sha1);
+    expect(parseReviewArgs(["--pr", "7", "--expect-head", sha256.toUpperCase()]).expectedHead).toBe(sha256);
     for (const bad of ["abc123", "g".repeat(40), "a".repeat(39), "a".repeat(41)]) {
       expect(() => parseReviewArgs(["--pr", "7", "--expect-head", bad])).toThrow("valid full commit SHA");
     }

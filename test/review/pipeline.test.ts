@@ -94,6 +94,48 @@ describe("runReview", () => {
     expect(result.head).toBe(localHead);
   });
 
+  test("does not default to a local HEAD with an invalid object-id length", async () => {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let capturedTarget: unknown;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefName,headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefName: "feature", headRefOid: "b".repeat(40) }), stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "feature\n", stderr: "" };
+      if (key === "git rev-parse HEAD") return { code: 0, stdout: `${"a".repeat(41)}\n`, stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          run,
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"] };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
+  });
+
   test("leaves the PR head unpinned off-branch and prints one stderr note", async () => {
     const writes: string[] = [];
     const originalWrite = process.stderr.write;

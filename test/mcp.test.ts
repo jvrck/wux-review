@@ -272,6 +272,7 @@ describe("review_diff MCP server", () => {
 
   test("expect_head reaches the shared PR pipeline and invalid SHAs are rejected", async () => {
     const head = "a".repeat(40);
+    const mixedCaseHead = "aA".repeat(20);
     let target: Target | undefined;
     const deps = {
       loadConfig: async () => ({}),
@@ -284,7 +285,7 @@ describe("review_diff MCP server", () => {
     await withServer(deps, async (client) => {
       const result = await client.callTool({
         name: "review_diff",
-        arguments: { pr: 42, expect_head: head },
+        arguments: { pr: 42, expect_head: mixedCaseHead },
       });
       expect(result.isError).toBeFalsy();
       expect(JSON.parse(textOf(result)).head).toBe(head);
