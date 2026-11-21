@@ -8,6 +8,7 @@ import type {
 import type { Backend } from "../../src/review/reviewers";
 import type { SessionStore } from "../../src/review/session-state";
 import type { SessionState } from "../../src/review/types";
+import type { Run } from "../../src/runtime/exec";
 
 const report = (findings: unknown[]): string => "```json\n" + JSON.stringify({ findings }) + "\n```";
 
@@ -57,6 +58,99 @@ function deps(claude: Backend, codex: Backend, store: SessionStore): ReviewDeps 
 describe("runReview", () => {
   test("rejects a ref combined with a pr (mutually exclusive targets)", async () => {
     await expect(runReview({ ref: "HEAD~1", pr: 7 }, { loadConfig: async () => ({}) })).rejects.toThrow("not both");
+  });
+
+  test("defaults the expected PR head to local HEAD when checked out on its branch", async () => {
+    const localHead = "a".repeat(40);
+    let capturedTarget: unknown;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefName,headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefName: "feature", headRefOid: "b".repeat(40) }), stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "feature\n", stderr: "" };
+      if (key === "git rev-parse HEAD") return { code: 0, stdout: `${localHead}\n`, stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    const result = await runReview(
+      { pr: 42, direct: true },
+      {
+        loadConfig: async () => ({ prHeadWaitMs: 1234 }),
+        run,
+        getDiff: async (target) => {
+          capturedTarget = target;
+          return { diff: "diff\n", files: ["x.ts"], head: localHead };
+        },
+        runReviewers: async () => ({
+          sessionId: "s",
+          claude: { reviewer: "claude", verdict: "approve", findings: [] },
+          codex: { reviewer: "codex", verdict: "approve", findings: [] },
+        }),
+      },
+    );
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: localHead, headWaitMs: 1234 });
+    expect(result.head).toBe(localHead);
+  });
+
+  test("leaves the PR head unpinned off-branch and prints one stderr note", async () => {
+    const writes: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let capturedTarget: unknown;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefName,headRefOid") {
+        return { code: 0, stdout: JSON.stringify({ headRefName: "feature", headRefOid: "b".repeat(40) }), stderr: "" };
+      }
+      if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "other\n", stderr: "" };
+      if (key === "git rev-parse HEAD") return { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      throw new Error(`unexpected command: ${key}`);
+    };
+    try {
+      await runReview(
+        { pr: 42, direct: true },
+        {
+          loadConfig: async () => ({}),
+          run,
+          getDiff: async (target) => {
+            capturedTarget = target;
+            return { diff: "diff\n", files: ["x.ts"] };
+          },
+          runReviewers: async () => ({
+            sessionId: "s",
+            claude: { reviewer: "claude", verdict: "approve", findings: [] },
+            codex: { reviewer: "codex", verdict: "approve", findings: [] },
+          }),
+        },
+      );
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    expect(capturedTarget).toEqual({ kind: "pr", pr: 42, expectedHead: undefined, headWaitMs: undefined });
+    expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
+  });
+
+  test("does not launch reviewers when PR diff acquisition fails after a second head move", async () => {
+    let launched = false;
+    await expect(runReview(
+      { pr: 42, expectedHead: "a".repeat(40), direct: true },
+      {
+        loadConfig: async () => ({}),
+        getDiff: async () => {
+          throw new Error(`PR #42 head is ${"c".repeat(40)}, expected ${"b".repeat(40)}; push may not have landed`);
+        },
+        runReviewers: async () => {
+          launched = true;
+          throw new Error("reviewers must not launch");
+        },
+      },
+    )).rejects.toThrow("push may not have landed");
+    expect(launched).toBe(false);
   });
 
   // #100: the envelope carries a 1-based round, sourced from and persisted to the

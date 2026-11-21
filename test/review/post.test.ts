@@ -139,7 +139,7 @@ describe("postToPr", () => {
       }
       return ok("");
     };
-    const env: VerdictEnvelope = { ...ENV, round: 3 };
+    const env: VerdictEnvelope = { ...ENV, round: 3, head: "abcdef0123456789abcdef0123456789abcdef01" };
     const results = await postToPr(42, env, run, () => AT);
 
     expect(results).toEqual([
@@ -154,9 +154,9 @@ describe("postToPr", () => {
     // The visible header carries round + updated-at + THAT leg's verdict.
     const bodies = calls.filter((c) => c.includes("POST")).map(bodyArg);
     const claudeBody = bodies.find((b) => b.includes("dual-review:claude"))!;
-    expect(claudeBody).toContain("**Dual-review (claude) — round 3 · updated 2026-07-24T12:00:00Z · verdict: clean**");
+    expect(claudeBody).toContain("**Dual-review (claude) — round 3 · head abcdef012345 · updated 2026-07-24T12:00:00Z · verdict: clean**");
     const codexBody = bodies.find((b) => b.includes("dual-review:codex"))!;
-    expect(codexBody).toContain("**Dual-review (codex) — round 3 · updated 2026-07-24T12:00:00Z · verdict: must-fix**");
+    expect(codexBody).toContain("**Dual-review (codex) — round 3 · head abcdef012345 · updated 2026-07-24T12:00:00Z · verdict: must-fix**");
   });
 
   test("a multi-round re-review keeps the comment count at 2 (upsert preserved) while the header changes", async () => {
@@ -214,6 +214,13 @@ describe("renderAgentComment", () => {
     );
     expect(renderAgentComment(env, "codex", AT)).toContain(
       "**Dual-review (codex) — round 4 · updated 2026-07-24T12:00:00Z · verdict: must-fix**",
+    );
+  });
+
+  test("the header records the reviewed PR head between round and timestamp", () => {
+    const env: VerdictEnvelope = { ...ENV, round: 4, head: "0123456789abcdef0123456789abcdef01234567" };
+    expect(renderAgentComment(env, "claude", AT)).toContain(
+      "**Dual-review (claude) — round 4 · head 0123456789ab · updated 2026-07-24T12:00:00Z · verdict: clean**",
     );
   });
 

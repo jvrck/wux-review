@@ -31,6 +31,8 @@ const PR_REFS = {
   baseRefName: "main",
 };
 const EXPECTED_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
+const MOVED_HEAD = "1111111111111111111111111111111111111111";
+const SECOND_MOVED_HEAD = "2222222222222222222222222222222222222222";
 const BASE_BLOB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HEAD_BLOB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const GITLINK_ONE = "cccccccccccccccccccccccccccccccccccccccc";
@@ -202,6 +204,112 @@ describe("getDiff", () => {
     await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD, headWaitMs: 0 } as never, run))
       .rejects.toThrow(`PR #42 head is ${PR_REFS.headRefOid}, expected ${EXPECTED_HEAD}; push may not have landed`);
     expect(diffRead).toBe(false);
+  });
+
+  test("uses an injected clock while waiting for a late expected PR head", async () => {
+    const heads = [PR_REFS.headRefOid, PR_REFS.headRefOid, EXPECTED_HEAD, EXPECTED_HEAD];
+    const sleeps: number[] = [];
+    let now = 1_000;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: heads.shift() ?? EXPECTED_HEAD }));
+      }
+      if (key === "gh pr diff 42") return ok(SAMPLE_DIFF);
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+    const getDiffWithClock = getDiff as unknown as (
+      target: { kind: "pr"; pr: number; expectedHead: string; headWaitMs: number },
+      run: Run,
+      clock: { now: () => number; sleep: (ms: number) => Promise<void> },
+    ) => ReturnType<typeof getDiff>;
+
+    const result = await getDiffWithClock(
+      { kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD, headWaitMs: 600 },
+      run,
+      {
+        now: () => now,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+          now += ms;
+        },
+      },
+    );
+
+    expect(result.head).toBe(EXPECTED_HEAD);
+    expect(sleeps).toEqual([250, 250]);
+  });
+
+  test("refetches once when the PR head moves during fetch and returns only the refetched diff", async () => {
+    const heads = [EXPECTED_HEAD, MOVED_HEAD, MOVED_HEAD];
+    let diffReads = 0;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: heads.shift() ?? MOVED_HEAD }));
+      }
+      if (key === "gh pr diff 42") {
+        diffReads += 1;
+        return ok(diffReads === 1 ? "first diff\n" : "refetched diff\n");
+      }
+      if (key === "gh pr diff 42 --name-only") return ok(diffReads === 1 ? "first.ts\n" : "second.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+
+    const result = await getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run);
+    expect(result).toEqual({ diff: "refetched diff\n", files: ["second.ts"], head: MOVED_HEAD });
+    expect(diffReads).toBe(2);
+  });
+
+  test("fails after a second PR head move instead of reviewing an inconsistent diff", async () => {
+    const heads = [EXPECTED_HEAD, MOVED_HEAD, SECOND_MOVED_HEAD];
+    let diffReads = 0;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: heads.shift() ?? SECOND_MOVED_HEAD }));
+      }
+      if (key === "gh pr diff 42") {
+        diffReads += 1;
+        return ok(`${diffReads}\n`);
+      }
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+
+    await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run)).rejects.toThrow(
+      `PR #42 head is ${SECOND_MOVED_HEAD}, expected ${MOVED_HEAD}; push may not have landed`,
+    );
+    expect(diffReads).toBe(2);
+  });
+
+  test("pins the large-PR fallback range and recorded head to the expected SHA", async () => {
+    const refs = { ...PR_REFS, headRefOid: EXPECTED_HEAD };
+    const range = `${refs.baseRefOid}...${EXPECTED_HEAD}`;
+    const calls: string[] = [];
+    const base = largePrFallbackRun(DIRECT_TOO_LARGE_RESPONSE);
+    const run: Run = async (cmd, stdin) => {
+      const key = cmd.join(" ");
+      calls.push(key);
+      if (key === "gh pr view 42 --json headRefOid") return ok(JSON.stringify({ headRefOid: EXPECTED_HEAD }));
+      if (key === "gh pr view 42 --json baseRefOid,headRefOid,baseRefName") return ok(JSON.stringify(refs));
+      if (key.includes(PR_REFS.headRefOid)) {
+        return base(cmd.map((part) => part.replace(EXPECTED_HEAD, PR_REFS.headRefOid)), stdin);
+      }
+      if (key === `git cat-file -e ${EXPECTED_HEAD}^{commit}`) return ok("");
+      if (key === `git merge-base ${refs.baseRefOid} ${EXPECTED_HEAD}`) return ok(`${refs.baseRefOid}\n`);
+      if (key === `git -c core.quotePath=false diff --raw --no-abbrev -z ${range}`) {
+        return ok(`:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0x.ts\0`);
+      }
+      if (key === `git -c core.quotePath=false diff ${range}`) return ok(SAMPLE_DIFF);
+      return base(cmd, stdin);
+    };
+
+    const result = await captureStderr(() => getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run));
+    expect(result.result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts"], head: EXPECTED_HEAD });
+    expect(calls).toContain(`git -c core.quotePath=false diff ${range}`);
+    expect(calls.some((call) => call.includes(PR_REFS.headRefOid))).toBe(false);
   });
 
   test("pr target shells out to gh pr diff", async () => {
@@ -680,8 +788,8 @@ describe("getDiff", () => {
       "git -c core.quotePath=false diff main...HEAD": ok(SAMPLE_DIFF),
       "git -c core.quotePath=false diff -z --name-only main...HEAD": z("x.ts", "sub/y.ts"),
     });
-    const { files } = await getDiff({ kind: "range", range: "main...HEAD" }, run);
-    expect(files).toEqual(["x.ts", "sub/y.ts"]);
+    const result = await getDiff({ kind: "range", range: "main...HEAD" }, run);
+    expect(result).toEqual({ diff: SAMPLE_DIFF, files: ["x.ts", "sub/y.ts"] });
   });
 
   test("preserves exact path content (spaces, non-ASCII, no trim) via NUL split", async () => {
@@ -701,9 +809,10 @@ describe("getDiff", () => {
       "git -c core.quotePath=false ls-files --others --exclude-standard -z": z("new.ts"),
       "git -c core.quotePath=false diff --no-index -- /dev/null new.ts": { code: 1, stdout: untrackedDiff, stderr: "" },
     });
-    const { diff, files } = await getDiff({ kind: "worktree" }, run);
-    expect(files).toEqual(["x.ts", "new.ts"]);
-    expect(diff).toContain("new.ts");
+    const result = await getDiff({ kind: "worktree" }, run);
+    expect(result.files).toEqual(["x.ts", "new.ts"]);
+    expect(result.diff).toContain("new.ts");
+    expect(result.head).toBeUndefined();
   });
 
   test("worktree falls back to branch-vs-base when tracked + untracked are empty", async () => {
