@@ -136,15 +136,14 @@ describe("runReview", () => {
     expect(writes.join("")).toBe("wux-review: PR #42: no expected head supplied; reviewing GitHub's current head\n");
   });
 
-  test("does not launch reviewers when PR diff acquisition fails after a second head move", async () => {
+  test("does not launch reviewers when a pinned PR moves during diff acquisition", async () => {
     const expected = "a".repeat(40);
     const moved = "b".repeat(40);
-    const movedAgain = "c".repeat(40);
-    const heads = [expected, moved, movedAgain];
+    const heads = [expected, moved];
     const run: Run = async (cmd) => {
       const key = cmd.join(" ");
       if (key === "gh pr view 42 --json headRefOid") {
-        return { code: 0, stdout: JSON.stringify({ headRefOid: heads.shift() ?? movedAgain }), stderr: "" };
+        return { code: 0, stdout: JSON.stringify({ headRefOid: heads.shift() ?? moved }), stderr: "" };
       }
       if (key === "gh pr diff 42") return { code: 0, stdout: "diff\n", stderr: "" };
       if (key === "gh pr diff 42 --name-only") return { code: 0, stdout: "x.ts\n", stderr: "" };
@@ -161,7 +160,7 @@ describe("runReview", () => {
           throw new Error("reviewers must not launch");
         },
       },
-    )).rejects.toThrow(`PR #42 head is ${movedAgain}, expected ${moved}; push may not have landed`);
+    )).rejects.toThrow(`PR #42 head is ${moved}, expected ${expected}; push may not have landed`);
     expect(launched).toBe(false);
   });
 

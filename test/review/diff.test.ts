@@ -241,7 +241,29 @@ describe("getDiff", () => {
     expect(sleeps).toEqual([250, 250]);
   });
 
-  test("refetches once when the PR head moves during fetch and returns only the refetched diff", async () => {
+  test("fails with the caller's original expected head when a pinned PR moves during fetch", async () => {
+    const heads = [EXPECTED_HEAD, MOVED_HEAD];
+    let diffReads = 0;
+    const run: Run = async (cmd) => {
+      const key = cmd.join(" ");
+      if (key === "gh pr view 42 --json headRefOid") {
+        return ok(JSON.stringify({ headRefOid: heads.shift() ?? MOVED_HEAD }));
+      }
+      if (key === "gh pr diff 42") {
+        diffReads += 1;
+        return ok("pinned diff\n");
+      }
+      if (key === "gh pr diff 42 --name-only") return ok("x.ts\n");
+      throw new Error(`unexpected command: ${key}`);
+    };
+
+    await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run)).rejects.toThrow(
+      `PR #42 head is ${MOVED_HEAD}, expected ${EXPECTED_HEAD}; push may not have landed`,
+    );
+    expect(diffReads).toBe(1);
+  });
+
+  test("an unpinned PR refetches once after a move and returns only the refetched diff", async () => {
     const heads = [EXPECTED_HEAD, MOVED_HEAD, MOVED_HEAD];
     let diffReads = 0;
     const run: Run = async (cmd) => {
@@ -257,12 +279,12 @@ describe("getDiff", () => {
       throw new Error(`unexpected command: ${key}`);
     };
 
-    const result = await getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run);
+    const result = await getDiff({ kind: "pr", pr: 42 }, run);
     expect(result).toEqual({ diff: "refetched diff\n", files: ["second.ts"], head: MOVED_HEAD });
     expect(diffReads).toBe(2);
   });
 
-  test("fails after a second PR head move instead of reviewing an inconsistent diff", async () => {
+  test("an unpinned PR fails after a second move instead of reviewing an inconsistent diff", async () => {
     const heads = [EXPECTED_HEAD, MOVED_HEAD, SECOND_MOVED_HEAD];
     let diffReads = 0;
     const run: Run = async (cmd) => {
@@ -278,7 +300,7 @@ describe("getDiff", () => {
       throw new Error(`unexpected command: ${key}`);
     };
 
-    await expect(getDiff({ kind: "pr", pr: 42, expectedHead: EXPECTED_HEAD }, run)).rejects.toThrow(
+    await expect(getDiff({ kind: "pr", pr: 42 }, run)).rejects.toThrow(
       `PR #42 head is ${SECOND_MOVED_HEAD}, expected ${MOVED_HEAD}; push may not have landed`,
     );
     expect(diffReads).toBe(2);
