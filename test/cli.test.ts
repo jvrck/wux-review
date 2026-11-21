@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { type CliDeps, parseReviewArgs, runCli } from "../src/cli";
@@ -508,6 +508,23 @@ describe("review pipeline (in-process, injected reviewers)", () => {
       Bun.spawnSync(["git", "worktree", "remove", "--force", worktree], { cwd: repo });
       rmSync(worktree, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("the checkout guard preserves leading and trailing whitespace in repo paths", async () => {
+    for (const suffix of [" leading", "trailing "]) {
+      const original = gitRepo();
+      const repo = `${original}${suffix}`;
+      renameSync(original, repo);
+      mkdirSync(join(repo, "sub"));
+      try {
+        for (const cwd of [repo, join(repo, "sub")]) {
+          const result = await callCli(["HEAD~1", "--direct", "--json"], cwd, { runReviewers: fakeReviewers([], []) });
+          expect(result.code).toBe(0);
+        }
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
     }
   });
 
